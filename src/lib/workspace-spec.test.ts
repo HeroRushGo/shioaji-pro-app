@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import Ajv2020 from 'ajv/dist/2020';
 import specSchema from '../../schemas/workspace-spec-v1.schema.json';
+import upstreamSpecSchema from '../../schemas/upstream-workspace-spec-v1.schema.json';
 import {
     BLOCK_META,
     CHART_INTERVALS,
@@ -471,6 +473,53 @@ describe('compactVertical', () => {
 });
 
 describe('workspace spec JSON schema', () => {
+    function consumerRegistry() {
+        const registry = new Ajv2020({ allErrors: true });
+        registry.addSchema(upstreamSpecSchema);
+        registry.addSchema(specSchema);
+        return registry;
+    }
+
+    it('registers the pinned upstream schema and fork schema under distinct selectable identities', () => {
+        const registry = consumerRegistry();
+        expect(upstreamSpecSchema.$id).toBe('https://github.com/Sinotrade/shioaji-pro-app/schemas/workspace-spec-v1.schema.json');
+        expect(upstreamSpecSchema.$comment).toContain('b26f066331fc1ee11410acb576b19bd641a5e1ba');
+        expect(WORKSPACE_SPEC_SCHEMA_ID).toBe('urn:herorushgo:shioaji-pro-app:workspace-spec:neo-research:v1');
+        expect(specSchema.$id).toBe(WORKSPACE_SPEC_SCHEMA_ID);
+        expect(specSchema.$id).not.toBe(upstreamSpecSchema.$id);
+        expect(registry.getSchema(upstreamSpecSchema.$id)).toBeTypeOf('function');
+        expect(registry.getSchema(WORKSPACE_SPEC_SCHEMA_ID)).toBeTypeOf('function');
+        expect(specSchema.properties.version.const).toBe(1);
+        expect(specSchema.$defs.panel.properties.type.enum.filter(type => type !== 'neo-research'))
+            .toEqual(upstreamSpecSchema.$defs.panel.properties.type.enum);
+    });
+
+    it('validates a research panel using the identity advertised by get_workspace_spec, while upstream rejects it', () => {
+        const registry = consumerRegistry();
+        const workspace: Workspace = {
+            blocks: [{ id: 'research-example', type: 'neo-research', pin: '2330' }],
+            layout: [{ i: 'research-example', x: 0, y: 0, w: 144, h: 16 }],
+        };
+        // get_workspace_spec advertises this same constant with workspaceToSpec's
+        // result. A consumer selects the registered schema from that envelope.
+        const readBack = { schema: WORKSPACE_SPEC_SCHEMA_ID, spec: workspaceToSpec(workspace) };
+        expect(readBack.spec.panels[0]?.type).toBe('neo-research');
+        expect(registry.validate(readBack.schema, readBack.spec)).toBe(true);
+        expect(registry.validate(upstreamSpecSchema.$id, readBack.spec)).toBe(false);
+        expect(registry.errors).toContainEqual(expect.objectContaining({
+            instancePath: '/panels/0/type', keyword: 'enum',
+        }));
+    });
+
+    it('accepts existing upstream workspaces with either registered schema', () => {
+        const registry = consumerRegistry();
+        for (const workspace of [base(), DEFAULT_WORKSPACE, ...LAYOUT_PRESETS.map(preset => preset.workspace)]) {
+            const spec = workspaceToSpec(workspace);
+            expect(registry.validate(upstreamSpecSchema.$id, spec), JSON.stringify(registry.errors)).toBe(true);
+            expect(registry.validate(WORKSPACE_SPEC_SCHEMA_ID, spec), JSON.stringify(registry.errors)).toBe(true);
+        }
+    });
+
     it('stays in sync with the TypeScript validator', () => {
         expect(specSchema.$id).toBe(WORKSPACE_SPEC_SCHEMA_ID);
         expect(specSchema.properties.version.const).toBe(WORKSPACE_SPEC_VERSION);

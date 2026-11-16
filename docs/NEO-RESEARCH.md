@@ -15,6 +15,8 @@ pnpm dev:research
 
 互動與還原共用大小限制（寬 4–12 欄、高 10–30 列），重載保留各面板的位置與大小。
 
+頁面預留捲軸空間，避免增刪面板使捲軸出現／消失時改變欄寬；舊瀏覽器以固定垂直捲軸退回。桌面驗收範圍為 1100px 以上。
+
 基線工具鏈為 Node 22.23.5、pnpm 10.34.9；`.nvmrc` 指定 Node。也可不改全域工具鏈而啟動：
 
 ```sh
@@ -58,6 +60,12 @@ pnpm preview:research
 `scripts/research-browser-qa.mjs` 匯出接受 Playwright `page` 的測試函式；由既有 Playwright 環境呼叫 `await run(page)`，自行建立／關閉隔離 context，不改使用者正在看的研究頁。須先起 5174 開發頁，瀏覽器測試不屬於一般 Vitest 套件，無新增 Playwright 依賴。
 
 瀏覽器驗收同時核對儲存值與實際 DOM 位置／尺寸，並跨導覽累積網路及交易快捷鍵事件。`test:research-boundary` 暫建無副作用的專案本地模組、注入研究入口，要求真實 Vite build 拒絕此未審閱的 `src/` 外 import；完成後清掉自己的 probe，不改應用程式來源。
+
+## Fork 版面規格
+
+原版工作台匯出含研究面板的版面時，`get_workspace_spec.schema` 使用 fork 專屬識別碼 `urn:herorushgo:shioaji-pro-app:workspace-spec:neo-research:v1`；規格內容為本 repo 的 `schemas/workspace-spec-v1.schema.json`。這個 URN 是驗證器 registry 的名稱，不表示已部署可下載的遠端 schema 服務。
+
+固定上游 `b26f0663` 的規格保留於 `schemas/upstream-workspace-spec-v1.schema.json`，兩個識別碼不同。開發期 Ajv2020 測試在同一個 consumer 同時登記兩份 schema：研究面板只通過 fork，既有上游版面兩者皆有效。Ajv 僅為測試依賴，不進研究頁 bundle。後續再擴充規格時，應更新 fork schema 版本與識別碼，避免相同 ID 對應不同規格。
 
 ## Git 與維護
 

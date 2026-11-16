@@ -4,10 +4,14 @@ export default async (page) => {
     const upstreamKeys = ['sj-pro-workspace-v3', 'sj-pro-workspace-v2'];
     const context = await page.context().browser().newContext({ viewport: { width: 1440, height: 1100 } });
     const qa = await context.newPage();
-    const errors = [], checks = [], calls = [], ticketActions = [], dialogs = [], renderedGeometryChecks = [];
+    const errors = [], checks = [], calls = [], ticketActions = [], dialogs = [], renderedGeometryChecks = [], membershipChecks = [];
     let requestCount = 0;
-    qa.on('pageerror', error => errors.push(String(error)));
-    qa.on('dialog', dialog => { dialogs.push(dialog.type()); void dialog.dismiss(); });
+    const observePage = observed => {
+        observed.on('pageerror', error => errors.push(String(error)));
+        observed.on('dialog', dialog => { dialogs.push(dialog.type()); void dialog.dismiss(); });
+    };
+    observePage(qa);
+    context.on('page', observePage);
     context.on('request', () => requestCount++);
 
     // The host retains all observations across every document/navigation.
@@ -62,6 +66,17 @@ export default async (page) => {
     const assert = (value, message) => { if (!value) throw new Error(message); };
     const panels = () => qa.locator('.research-panel');
     const first = () => panels().first();
+    const panelIds = () => panels().evaluateAll(elements => elements.map(element => element.dataset.panelId).sort());
+    const assertPanelIds = async (expected, label) => {
+        const sorted = [...expected].sort();
+        await qa.waitForFunction(({ key, expected }) => {
+            const stored = JSON.parse(localStorage.getItem(key)).panels.map(panel => panel.id).sort();
+            const rendered = [...document.querySelectorAll('.research-panel')].map(panel => panel.dataset.panelId).sort();
+            return JSON.stringify(stored) === JSON.stringify(expected)
+                && JSON.stringify(rendered) === JSON.stringify(expected);
+        }, { key: storageKey, expected: sorted });
+        assert(JSON.stringify(await panelIds()) === JSON.stringify(sorted), label);
+    };
     const flushCalls = () => qa.evaluate(() => window.__flushResearchCalls?.());
     const reload = async () => {
         await flushCalls();
@@ -199,17 +214,40 @@ export default async (page) => {
         await assertGeometry(resizedGeometry, 'drag/resize geometry changed on reload');
         await assertRenderedGeometry(resizedRenderedGeometry, 'drag/resize DOM geometry changed on reload');
         checks.push('drag/resize/reload preserves stored and rendered panel geometry');
+        const originalIds = await panels().evaluateAll(elements => elements.map(element => element.dataset.panelId));
+        const removedId = originalIds[1];
         await qa.getByRole('button', { name: '新增研究面板', exact: true }).click();
         await qa.waitForFunction(() => document.querySelectorAll('.research-panel').length === 3);
-        await panels().last().getByTitle('移除此面板').click();
+        const idsAfterAdd = await panelIds();
+        const addedId = idsAfterAdd.find(id => !originalIds.includes(id));
+        assert(addedId && idsAfterAdd.length === originalIds.length + 1, 'new panel ID missing');
+        const afterAdd = await stableGeometry();
+        const afterAddRendered = await stableRenderedGeometry();
+        await reload();
+        await first().getByText('6488 · 2026-11-12', { exact: true }).waitFor();
+        await assertPanelIds(idsAfterAdd, 'added panel membership changed on reload');
+        await assertGeometry(afterAdd, 'added panel stored geometry changed on reload');
+        await assertRenderedGeometry(afterAddRendered, 'added panel DOM geometry changed on reload');
+        membershipChecks.push({ phase: 'add/reload', ids: idsAfterAdd, addedId });
+        checks.push('new third panel ID and stored/rendered geometry survive reload');
+
+        // Remove an original panel, not the one just added: a persistence
+        // implementation that always restores the initial two must fail here.
+        await qa.locator(`.research-panel[data-panel-id="${removedId}"]`).getByTitle('移除此面板').click();
         await qa.waitForFunction(() => document.querySelectorAll('.research-panel').length === 2);
+        const idsAfterRemove = idsAfterAdd.filter(id => id !== removedId);
+        await assertPanelIds(idsAfterRemove, 'original panel removal was not saved');
         const afterRemove = await stableGeometry();
         const afterRemoveRendered = await stableRenderedGeometry();
         await reload();
         await first().getByText('6488 · 2026-11-12', { exact: true }).waitFor();
         assert(await qa.getByLabel('截至時間', { exact: true }).inputValue() === '10:00', 'restore cursor');
+        await assertPanelIds(idsAfterRemove, 'removed original panel returned on reload');
+        assert((await panelIds()).includes(addedId) && !(await panelIds()).includes(removedId),
+            'new panel lost or removed original panel resurrected');
         await assertGeometry(afterRemove, 'add/remove geometry changed on reload');
         await assertRenderedGeometry(afterRemoveRendered, 'add/remove DOM geometry changed on reload');
+        membershipChecks.push({ phase: 'remove-original/reload', ids: idsAfterRemove, addedId, removedId });
         checks.push('add/remove/reload preserves stored and rendered panel geometry');
         await qa.getByLabel('其他代號', { exact: true }).fill('0000');
         await qa.getByRole('button', { name: '查詢', exact: true }).click();
@@ -258,6 +296,41 @@ export default async (page) => {
         assert(!unknownBody.includes('src/main.tsx'), 'unknown bookmark returned the trading entry');
         blocked['/missing-research-bookmark'] = unknownBookmark.status();
         checks.push('unknown bookmark returns 404 without trading HTML');
+
+        const assetPath = '/favicon.svg';
+        const asset = await context.request.get(origin + assetPath);
+        assert(asset.status() === 200 && (asset.headers()['content-type'] ?? '').includes('image/svg+xml'),
+            'public favicon.svg must exist as a normal static resource');
+        const navigationPage = await context.newPage();
+        const staticNavigation = { asset: assetPath, resourceStatus: asset.status() };
+        try {
+            // A real document navigation sends Sec-Fetch-Dest: document; a raw
+            // API GET cannot exercise this part of the research route boundary.
+            const documentResponse = navigationPage.waitForResponse(response =>
+                response.url() === origin + assetPath && response.request().isNavigationRequest());
+            try {
+                await navigationPage.goto(origin + assetPath, { waitUntil: 'commit' });
+            } catch (error) {
+                // Chromium can report an empty 404 response as a failed page
+                // load. Still require the actual navigation response below.
+                if (!String(error).includes('net::ERR_HTTP_RESPONSE_CODE_FAILURE')) throw error;
+            }
+            staticNavigation.documentStatus = (await documentResponse).status();
+            assert(staticNavigation.documentStatus === 404, 'static resource document navigation must return 404');
+            await navigationPage.evaluate(() => window.__flushResearchCalls?.());
+            const researchResponse = await navigationPage.goto(`${origin}/research.html`);
+            staticNavigation.researchStatus = researchResponse?.status();
+            assert(staticNavigation.researchStatus === 200, 'research entry unavailable after rejected document navigation');
+            await navigationPage.getByRole('heading', { name: 'Neo 研究工作台', exact: true }).waitFor();
+            await navigationPage.locator('.nr-panel').first().waitFor();
+            await navigationPage.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        } finally {
+            // Extra test pages use the same host observations and must flush
+            // their HMR/event reports before closing, just like the main page.
+            await navigationPage.evaluate(() => window.__flushResearchCalls?.());
+            await navigationPage.close();
+        }
+        checks.push('existing public SVG serves as resource but document navigation returns 404; research page recovers');
 
         // Valid upstream v3 uses the 288-column grid; v2 uses the legacy 24-column grid.
         const upstreamWorkspaces = {
@@ -326,7 +399,8 @@ export default async (page) => {
         assert(unexpected.length === 0, `unexpected network attempts: ${JSON.stringify(unexpected)}`);
         checks.push('all navigations: zero fetch/XHR/SSE/broker sockets; only identified Vite HMR allowed');
         assert(errors.length === 0, errors.join('; '));
-        return { checks, blocked, entryStatuses, calls, ticketActions, dialogs, renderedGeometryChecks,
+        return { checks, blocked, entryStatuses, staticNavigation, calls, ticketActions, dialogs,
+            renderedGeometryChecks, membershipChecks,
             pageErrors: errors, requests: requestCount,
             viewport: { width: 1440, height: 1100 } };
     } finally {
