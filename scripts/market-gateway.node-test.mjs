@@ -32,6 +32,20 @@ test('SSE projects only named market frames, across split UTF8/CRLF boundaries',
     assert.doesNotMatch(result, /account_id|private|drop|unknown|order_event/);
 });
 
+test('real 1.7.11 night-session market payloads preserve quote values through projection', async () => {
+    const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/market-sse-1.7.11.json', import.meta.url), 'utf8'));
+    const filter = new MarketEvents(); let wire = '';
+    filter.on('data', chunk => wire += chunk);
+    const done = once(filter, 'end');
+    for (const [event, data] of Object.entries(fixture.events)) filter.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    filter.end(); await done;
+    const decoded = Object.fromEntries(wire.trim().split('\n\n').map(frame => {
+        const [event, data] = frame.split('\n'); return [event.slice(7), JSON.parse(data.slice(6))];
+    }));
+    assert.deepEqual(decoded, fixture.events);
+    assert.equal(typeof decoded.tick_fop.close, 'string', 'SDK decimal strings must not lose precision');
+});
+
 test('gateway rejects before forwarding, authenticates privately and removes info metadata', async t => {
     const seen = [];
     const upstream = http.createServer((req, res) => {
