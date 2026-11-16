@@ -12,10 +12,12 @@ export const PANEL_SIZE_LIMITS = {
 export const DEFAULT_PANEL_SIZE = { w: 6, h: 16, ...PANEL_SIZE_LIMITS } as const;
 export type ResearchPanel = { id: string; type: 'neo-research'; pin: string | null };
 export type ResearchWorkspace = {
-    version: 1;
+    version: 2;
     symbol: string;
     date: string;
     cutoff: string;
+    sourceMode: 'real' | 'fixture';
+    financeMode: 'latest' | 'as_of';
     panels: ResearchPanel[];
     layout: LayoutItem[];
 };
@@ -24,9 +26,16 @@ export function validSymbol(value: unknown): value is string {
     return typeof value === 'string' && /^\d{4}$/.test(value);
 }
 
+export function validResearchDate(value: unknown): value is string {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
 export function defaultWorkspace(): ResearchWorkspace {
     return {
-        version: 1, symbol: '2330', date: '2026-11-13', cutoff: '13:30',
+        version: 2, symbol: '2330', date: '2026-11-13', cutoff: '13:30',
+        sourceMode: 'real', financeMode: 'latest',
         panels: [
             { id: 'research-1', type: 'neo-research', pin: null },
             { id: 'research-2', type: 'neo-research', pin: '2891' },
@@ -50,7 +59,11 @@ export function restoreWorkspace(raw: string | null): ResearchWorkspace {
     const defaults = defaultWorkspace();
     try {
         const value: unknown = JSON.parse(raw ?? 'null');
-        if (!record(value) || value.version !== 1 || !Array.isArray(value.panels)) return defaults;
+        if (!record(value) || (value.version !== 1 && value.version !== 2) || !Array.isArray(value.panels)) return defaults;
+        // A v1 workspace only ever displayed synthetic data. Migration must
+        // not turn its old date/cursor into an implicit real-data request.
+        const sourceMode = value.version === 2 && value.sourceMode === 'real' ? 'real' : 'fixture';
+        const financeMode = sourceMode === 'real' && value.financeMode === 'latest' ? 'latest' : 'as_of';
         const seen = new Set<string>();
         const panels: ResearchPanel[] = [];
         for (const candidate of value.panels) {
@@ -75,12 +88,12 @@ export function restoreWorkspace(raw: string | null): ResearchWorkspace {
             };
         });
         return {
-            version: 1,
+            version: 2,
             symbol: validSymbol(value.symbol) ? value.symbol : defaults.symbol,
-            date: value.date === '2026-11-12' ? value.date : defaults.date,
+            date: validResearchDate(value.date) ? value.date : defaults.date,
             cutoff: typeof value.cutoff === 'string' && /^(?:0[89]|1[0-3]):[0-5]\d$/.test(value.cutoff)
                 ? value.cutoff : defaults.cutoff,
-            panels, layout,
+            sourceMode, financeMode, panels, layout,
         };
     } catch { return defaults; }
 }
