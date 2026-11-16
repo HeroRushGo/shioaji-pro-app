@@ -158,6 +158,8 @@ test('keeps finance formats nullable and preserves valid missing numeric values'
     await materializeFinance({ ...args(fixture), symbols: ['6488', '2891'], ...publisher });
     const [bank, otc] = publisher.calls[0].input.items.map(item => item.data);
     assert.equal(bank.market, 'TSE');
+    assert.deepEqual(bank.provenance.statementFormats, ['holding']);
+    assert.match(bank.provenance.revenueDefinition, /與一般業營收口徑不同/);
     assert.ok(bank.quarters.every(row => row.grossMarginPercent === null));
     assert.equal(otc.market, 'OTC');
     assert.deepEqual(otc.revenue[0], { period: '2026-10', revenueThousands: null, yoyPercent: null });

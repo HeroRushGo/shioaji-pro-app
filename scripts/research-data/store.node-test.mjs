@@ -114,6 +114,21 @@ test('missing or corrupted persistent withdrawal ledger stops serving rather tha
     await assert.rejects(readCatalog(root));
     await assert.rejects(publishRelease(input(root, 'finance-b')));
 });
+test('family withdrawal also blocks packaged IDs absent from a rolled-back source pointer', async t => {
+    const source = await temporary(t), built = await temporary(t);
+    const old = await publishRelease(input(source, 'finance-old'), { now: first });
+    const newer = await publishRelease(input(source, 'finance-new'), { now: '2026-11-17T04:00:00Z' });
+    for (const file of await publishedFiles(source)) {
+        await fs.mkdir(path.dirname(path.join(built, file.path)), { recursive: true });
+        await fs.writeFile(path.join(built, file.path), file.bytes);
+    }
+    await fs.writeFile(path.join(source, 'catalog.json'), canonical(old.catalog));
+    await revokeReleases({ root: source, kind: 'finance', reason: 'unknown upstream withdrawal' });
+    const url = `/research-data/${newer.release.items[0].path}`;
+    const middleware = researchDataMiddleware(built, { withdrawalRoot: source });
+    assert.equal((await request(middleware, url)).status, 404);
+    await assert.rejects(readDataFile(source, newer.release.items[0].path, newer.catalog), /revoked/);
+});
 test('read middleware denies mutations, cross-site and unlisted paths with no static fallback', async t => {
     const root = await temporary(t); const middleware = researchDataMiddleware(root);
     assert.equal((await request(middleware, '/other')).next, true);

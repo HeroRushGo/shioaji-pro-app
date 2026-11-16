@@ -3,6 +3,7 @@ import { readCatalog, readDataFile } from './store.mjs';
 /** Narrow static read surface shared by dev and built preview. */
 export function researchDataMiddleware(root, { withdrawalRoot } = {}) {
     const rememberedWithdrawals = new Set();
+    const blockedKinds = new Set();
     return async (request, response, next) => {
         const raw = request.url ?? '/';
         if (!raw.startsWith('/research-data')) { next(); return; }
@@ -26,7 +27,11 @@ export function researchDataMiddleware(root, { withdrawalRoot } = {}) {
             const catalog = await readCatalog(root);
             const withdrawals = withdrawalRoot ? await readCatalog(withdrawalRoot) : catalog;
             for (const id of [...catalog.revoked, ...withdrawals.revoked]) rememberedWithdrawals.add(id);
-            const selected = { ...catalog, revoked: [...rememberedWithdrawals] };
+            for (const kind of [...(catalog.blockedKinds ?? []), ...(withdrawals.blockedKinds ?? [])]) blockedKinds.add(kind);
+            // A retained build may contain IDs absent from a rolled-back pointer.
+            // A family withdrawal still covers those older packaged payloads.
+            for (const kind of blockedKinds) for (const release of catalog[`${kind}Releases`]) rememberedWithdrawals.add(release.id);
+            const selected = { ...catalog, revoked: [...rememberedWithdrawals], blockedKinds: [...blockedKinds] };
             if (raw === '/research-data/catalog.json') end(200, JSON.stringify(selected));
             else end(200, await readDataFile(root, relative, selected));
         } catch { end(404, '{"error":"research_data_unavailable"}'); }

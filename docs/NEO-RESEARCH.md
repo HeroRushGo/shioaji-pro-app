@@ -44,7 +44,9 @@ npm exec --yes --package=node@22.23.5 --package=pnpm@10.34.9 -- pnpm dev:researc
 - 單季 EPS 另比對上游 `income_quarter` 與同年 `income_ytd` 差分；第一季標「第一季公告值」，第二至四季標「單季，累計相減推算」。一般業單季毛利率為同季毛利／同季營收 ×100，不能相減兩季累計毛利率；缺值、金融業不適用項目維持 null。
 - neo：四股的 **2026-11-13**，30 分鐘精確截止採樣；當時核對的 clean neo HEAD 為 `560a7eef386c19981a5f60ffa8560acda427ca03`。本文件不宣稱其他日期已匯入。
 
-本機核對紀錄為 `/private/tmp/shioaji-pro-real-data/source-check/verification.json` 與 `projection-check.json`，屬驗收產物，未納入 Git。前者記錄固定來源 hash、期別與官方抽核範圍，後者記錄單季 EPS 與毛利率 projection 的核對。最終程式 HEAD、測試數量與瀏覽器結果以本輪交付收據為準。
+金融股另以 MOPS 115 年 9 月歷史營收表核對中信金 21,331,939 千元，數值一致。官方口徑註明金控營業收入為認列所有子公司損益之合計，與一般業營收不同，面板在財務時點旁保留此註記。Q2 EPS 僅核對上游 YTD 差分，沒有宣稱獨立核對官方同季 EPS 原報。
+
+本機核對紀錄為 `/private/tmp/shioaji-pro-real-data/source-check/verification.json`、`projection-check.json` 與 `banking-check.json`，屬驗收產物，未納入 Git。最終程式 HEAD、測試數量與瀏覽器結果以本輪交付收據為準。
 
 ## 手動匯入真實資料
 

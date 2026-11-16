@@ -103,6 +103,8 @@ function FinanceTime({ snapshot }: { snapshot: ResearchSnapshot }) {
                 ? '最新可用財務，與重播時點不同；不是當時已知資料。'
                 : `歷史財務截止 ${snapshot.asOf}，只讀此前已留存版本；沒有留存就保持缺資料。`}
         <br />首次留存：{snapshot.finance.firstSeenAt ?? '未留存'}
+        {typeof snapshot.finance.provenance?.revenueDefinition === 'string'
+            && <><br />{snapshot.finance.provenance.revenueDefinition}</>}
     </p>;
 }
 function ReplayTime({ snapshot }: { snapshot: ResearchSnapshot }) {

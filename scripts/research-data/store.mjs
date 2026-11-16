@@ -208,7 +208,11 @@ export async function readDataFile(root, relative, selectedCatalog) {
     const current = await readCatalog(directory);
     const catalog = selectedCatalog ?? current;
     let approved;
-    for (const release of [...catalog.financeReleases, ...catalog.replayReleases]) {
+    for (const [kind, release] of [
+        ...catalog.financeReleases.map(release => ['finance', release]),
+        ...catalog.replayReleases.map(release => ['replay', release]),
+    ]) {
+        if (current.blockedKinds?.includes(kind) || catalog.blockedKinds?.includes(kind)) continue;
         if (current.revoked.includes(release.id) || catalog.revoked.includes(release.id)) continue;
         const item = release.items.find(item => item.path === relative);
         if (item) { approved = item; break; }

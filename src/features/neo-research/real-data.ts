@@ -11,6 +11,7 @@ export interface ResearchRelease {
 export interface ResearchCatalog {
     schemaVersion: 1; updatedAt: string; revoked: string[];
     financeReleases: ResearchRelease[]; replayReleases: ResearchRelease[];
+    blockedKinds?: ('finance' | 'replay')[];
 }
 type Row = Record<string, unknown>;
 const record = (value: unknown): value is Row => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -29,6 +30,8 @@ const assert: (condition: unknown, reason: string) => asserts condition = (condi
 export function parseResearchCatalog(value: unknown): ResearchCatalog {
     assert(record(value) && value.schemaVersion === 1 && time(value.updatedAt), '未知研究目錄格式。');
     assert(Array.isArray(value.revoked) && value.revoked.every(identifier), '撤回清單無效。');
+    assert(value.blockedKinds === undefined || Array.isArray(value.blockedKinds)
+        && value.blockedKinds.every(kind => kind === 'finance' || kind === 'replay'), '撤回資料類型無效。');
     const ids = new Set<string>();
     for (const kind of ['finance', 'replay'] as const) {
         const releases = value[`${kind}Releases`];
@@ -88,6 +91,7 @@ function sortReleases(releases: ResearchRelease[]) {
     return [...releases].sort((a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt) || b.id.localeCompare(a.id));
 }
 function selectRelease(catalog: ResearchCatalog, kind: 'finance' | 'replay', query: ResearchQuery) {
+    if (catalog.blockedKinds?.includes(kind)) return { metadata: info('revoked', kind, '此資料來源因撤回暫停提供，需完成來源核對後才能恢復。') };
     const candidates = sortReleases(catalog[`${kind}Releases`]).filter(release => release.items.some(item => item.symbol === query.symbol
         && (kind === 'finance' || item.date === query.date)));
     const eligible = kind === 'finance' && query.financeMode === 'as_of'
@@ -172,7 +176,7 @@ export async function loadRealResearchSnapshot(query: ResearchQuery, signal?: Ab
             const payload = parsePayload(await readJson(item.path, signal, item.sha256), kind, release, item);
             // Re-read withdrawals after payload validation; a pointer switch must not revive a withdrawn pinned version.
             const current = await loadResearchCatalog(signal);
-            if (current.revoked.includes(release.id)) { result[key] = info('revoked', kind, '資料在載入期間撤回，已拒絕顯示。', release); return; }
+            if (current.revoked.includes(release.id) || current.blockedKinds?.includes(kind)) { result[key] = info('revoked', kind, '資料在載入期間撤回，已拒絕顯示。', release); return; }
             result[key] = { ...selection.metadata, provenance: payload.provenance as Row,
                 notice: kind === 'finance' ? requested.financeMode === 'as_of' ? '依本機當時已留存版本顯示。' : '最新可用財務；不是重播當時已知資料。' : 'neo 原始前綴輸出，瀏覽器不重算 VWAP／POC。' };
             if (kind === 'finance') {

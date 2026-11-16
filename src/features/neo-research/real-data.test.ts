@@ -120,6 +120,25 @@ describe('verified local research provider', () => {
         }));
         expect((await loadRealResearchSnapshot(query)).finance.status).toBe('revoked');
     });
+    it('reports an entire withdrawn family even without a retained symbol version', async () => {
+        const data = setup(); data.catalog.blockedKinds = ['finance'];
+        const result = await loadRealResearchSnapshot({ ...query, symbol: '9999' });
+        expect(result.finance.status).toBe('revoked'); expect(result.replayInfo.status).toBe('missing');
+        expect(result.revenue).toEqual([]);
+    });
+    it('rejects an in-flight family withdrawal even if its pinned ID disappeared from the current pointer', async () => {
+        const data = setup(); const original = vi.mocked(fetch).getMockImplementation()!;
+        vi.stubGlobal('fetch', vi.fn(async (...args: Parameters<typeof fetch>) => {
+            const response = await original(...args);
+            if (String(args[0]).includes('releases/finance-a/')) {
+                data.catalog.blockedKinds = ['finance']; data.catalog.financeReleases = [];
+            }
+            return response;
+        }));
+        const result = await loadRealResearchSnapshot(query);
+        expect(result.finance.status).toBe('revoked'); expect(result.revenue).toEqual([]);
+        expect(result.replayInfo.status).toBe('ready');
+    });
     it('keeps missing symbols/dates and pre-open samples empty', async () => {
         setup(); const missing = await loadRealResearchSnapshot({ ...query, symbol: '9999' });
         expect(missing.revenue).toEqual([]); expect(missing.replay).toEqual([]); expect(missing.status).toBe('missing');

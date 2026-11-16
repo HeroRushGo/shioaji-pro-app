@@ -177,6 +177,10 @@ function projectFinancial(raw, context) {
             sourceSha256: context.sourceSha256, manifestSha256: context.manifestSha256,
             sourceUrl: context.sourceUrl, sources: context.sources,
             sourceRegistry: { sha256: context.registrySha256, schema: context.registrySchema, checkedAgainstCommit: context.commit },
+            statementFormats: [...new Set(raw.statements.format)],
+            ...(raw.statements.format.at(-1) === 'holding' ? {
+                revenueDefinition: '金控營業收入為認列所有子公司損益之合計，與一般業營收口徑不同。',
+            } : {}),
             calculations: {
                 revenueUnit: 'thousand_TWD', epsUnit: 'TWD_per_share', grossMarginUnit: 'percent',
                 eps: 'income_quarter[基本每股盈餘（元）]; Q1 reported, Q2–Q4 upstream derived by income_ytd differencing',
