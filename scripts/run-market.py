@@ -47,16 +47,23 @@ def stop_children(children, grace=8):
         except PermissionError:
             # macOS process policy can return EPERM for an already-gone
             # group. Check only public PGIDs; never infer absence from EPERM.
-            groups = subprocess.check_output(['/bin/ps', '-axo', 'pgid='], text=True)
-            return pid in {int(value) for value in groups.split()}
+            groups = subprocess.check_output(['/bin/ps', '-axo', 'pgid=,stat='], text=True)
+            return any(int(parts[0]) == pid and not parts[1].startswith('Z')
+                       for line in groups.splitlines() if len(parts := line.split()) == 2)
     def send(pid, signum):
         try:
             os.killpg(pid, signum)
         except ProcessLookupError:
             pass
         except PermissionError:
-            if group_alive(pid):
-                raise
+            # A process can be dying between signal delivery and the PGID
+            # snapshot. Never mistake a zombie for an active leaked process;
+            # conversely, a persistent denial for a live group remains fatal.
+            for _ in range(3):
+                if not group_alive(pid):
+                    return
+                time.sleep(.01)
+            raise
     for child in reversed(children):
         send(child.pid, signal.SIGTERM)
     deadline = time.monotonic() + grace

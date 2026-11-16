@@ -15,6 +15,17 @@ spec.loader.exec_module(market)
 
 
 class MarketLauncherTests(unittest.TestCase):
+    def test_macos_eperm_for_zombie_group_is_not_a_live_permission_failure(self):
+        leader = Mock(pid=43210)
+        with patch.object(market.os, 'killpg', side_effect=PermissionError()), patch.object(market.subprocess, 'check_output', return_value='43210 Z\n'):
+            market.stop_children([leader], grace=0)
+        leader.wait.assert_called_once_with(timeout=2)
+
+    def test_persistent_permission_denial_for_a_live_group_is_not_hidden(self):
+        leader = Mock(pid=43210)
+        with patch.object(market.os, 'killpg', side_effect=PermissionError()), patch.object(market.subprocess, 'check_output', return_value='43210 S\n'):
+            with self.assertRaises(PermissionError): market.stop_children([leader], grace=0)
+
     def test_repeated_interrupts_cannot_abort_group_or_session_cleanup(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
