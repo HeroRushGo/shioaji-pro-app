@@ -1,4 +1,5 @@
 import { contractMarket, isWarrantContract } from './contract-market';
+import { marketOnly } from './market-profile';
 import { warrantExitBySharesProblem, warrantMarketOrderBlock, warrantOrderProblem } from './warrant-rules';
 import { canTrade } from './account-tradable';
 import { createAccountQuery } from './account-query';
@@ -103,6 +104,7 @@ export function isFuturesContract(contract: ContractBase): boolean {
 // (esp. with real money on the line) must not think a click went through
 // when it didn't (issue #2). UI also disables the buttons; this backs it up.
 export function assertTradingLive() {
+    if (marketOnly) throw mutationNotStartedError('行情唯讀模式：交易功能未開放');
     if (getStreamStatus() !== 'live' || !getTradingMirrorFresh()) {
         throw mutationNotStartedError(
             '行情非 LIVE 或主視窗交易狀態未連線，已暫停下單，請待連線恢復',

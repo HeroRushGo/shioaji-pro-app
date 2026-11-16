@@ -344,7 +344,8 @@ describe('本機開發與 preview 的六條固定名稱 metadata 代理', () => 
         expect(use).toHaveBeenCalledTimes(2);
     }, 30_000);
 
-    it('preview hook 也只在明確 loopback 啟用', () => {
+    it('preview hook 也只在明確 loopback 啟用', async () => {
+        const configFile = path.resolve(__dirname, '../vite.config.ts');
         const configure = etfMetadataProxyPlugin().configurePreviewServer;
         if (typeof configure !== 'function') throw new Error('configurePreviewServer hook missing');
         const use = vi.fn();
@@ -354,7 +355,10 @@ describe('本機開發與 preview 的六條固定名稱 metadata 代理', () => 
         expect(use).not.toHaveBeenCalled();
         configure.call({} as never, { config: { preview: { host: '127.0.0.1' } }, middlewares: { use } } as unknown as PreviewServer);
         expect(use).toHaveBeenCalledOnce();
-        expect(configSource).toMatch(/preview:\s*\{\s*host:\s*'127\.0\.0\.1'\s*\}/);
+        const normal = await resolveConfig({ configFile, logLevel: 'silent' }, 'serve', 'production', 'production', true);
+        const market = await resolveConfig({ configFile, logLevel: 'silent' }, 'serve', 'market', 'market', true);
+        expect(normal.preview.host).toBe('127.0.0.1');
+        expect(market.preview).toMatchObject({ host: '127.0.0.1', port: 5173, strictPort: true, proxy: { '/api': 'http://127.0.0.1:21323' } });
     });
 
     it('真實 Vite preview 會載入 apply:serve plugin 並代理固定 metadata，而非 SPA fallback', async () => {

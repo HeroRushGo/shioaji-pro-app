@@ -9,6 +9,8 @@ import { getServerModeVersion } from './server-info-store';
 import { classifyHttpOrderError } from './order-outcome';
 import { isMainWindow } from './main-window-commands';
 import { popoutOrderPost } from './popout-order';
+import { marketOnly } from './market-profile';
+import { allowedMarketRequest } from './market-policy.mjs';
 
 // resolved per request — the server port can move at runtime (e.g. the boot
 // flow discovers the default port occupied and starts on a fallback), and a
@@ -128,6 +130,9 @@ async function withWebviewInfoSlot<T>(origin: string, signal: AbortSignal | unde
 }
 
 async function doFetch(url: string, init?: RequestInit, beforeDispatch?: () => void): Promise<Response> {
+    if (marketOnly && !allowedMarketRequest(init?.method ?? 'GET', url)) {
+        throw Object.assign(new Error('行情唯讀模式：此操作未開放'), { mutationNotStarted: true });
+    }
     // #285: an App launch reads nothing until boot has checked the server
     const held = serverReadsHeld();
     if (held) {
@@ -311,6 +316,10 @@ export async function apiPost<T>(
         onResponse?: (res: Response) => void;
     },
 ): Promise<T> {
+    // Reject before loading any native transport or invoking a dispatch hook.
+    if (marketOnly && !allowedMarketRequest('POST', path)) {
+        throw Object.assign(new Error('行情唯讀模式：此操作未開放'), { mutationNotStarted: true });
+    }
     // Trade reports are account-scoped; market-data subscriptions are not.
     // Loading the native transport (or serializing the body) can outlive a
     // mode change, even when the final mode is the same as the initial one.

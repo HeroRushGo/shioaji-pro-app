@@ -3,6 +3,7 @@
 import type { LayoutItem } from 'react-grid-layout';
 import { isLinkGroup, LINK_GROUPS, type LinkGroupId } from './flash-link';
 import { decodeQuoteBoardFields, encodeQuoteBoardFields } from './quote-board-fields';
+import { marketOnly } from './market-profile';
 
 // 版面座標底座（儲存基準）：288 欄 = 傳統 24 欄 × 12。
 // - 撰寫/舊存檔仍是 24 欄語意，載入時 ×12 無損升階
@@ -454,7 +455,7 @@ export const BLOCK_META: Record<
     },
     'neo-research': {
         label: 'Neo 研究',
-        description: '獨立研究面板原型；公司財務與 VWAP／POC 合成示範資料',
+        description: '真實財務與 Neo 唯讀重播；最新可用財務與歷史重播時點分別標示',
         category: 'tools',
         pinnable: true,
         singleton: false,
@@ -648,8 +649,27 @@ const RAW_DEFAULT_WORKSPACE: Workspace = {
     ],
 };
 
+// 行情研究從自己的版面開始，不搬用正常 Pro 的交易版面。研究面板位於
+// 頂端並與目前選股連動；五檔、明細仍可同時對照，不預載下單或帳務。
+const RAW_MARKET_WORKSPACE: Workspace = {
+    blocks: [
+        { id: 'watchlist-market', type: 'watchlist', pin: null },
+        { id: 'chart-market', type: 'chart', pin: null },
+        { id: 'depth-market', type: 'depth', pin: null },
+        { id: 'tape-market', type: 'tape', pin: null },
+        { id: 'neo-research-market', type: 'neo-research', pin: null },
+    ],
+    layout: [
+        { i: 'watchlist-market', x: 0, y: 0, w: 4, h: 19, minW: 3, minH: 6 },
+        { i: 'chart-market', x: 4, y: 0, w: 11, h: 11, minW: 6, minH: 7 },
+        { i: 'depth-market', x: 4, y: 11, w: 5, h: 8, minW: 4, minH: 7 },
+        { i: 'tape-market', x: 9, y: 11, w: 6, h: 8, minW: 3, minH: 4 },
+        { i: 'neo-research-market', x: 15, y: 0, w: 9, h: 19, minW: 4, minH: 10 },
+    ],
+};
+
 export const DEFAULT_WORKSPACE: Workspace = upscaleLegacyWorkspace(
-    RAW_DEFAULT_WORKSPACE,
+    marketOnly ? RAW_MARKET_WORKSPACE : RAW_DEFAULT_WORKSPACE,
 );
 
 // 內建版面格子：最小尺寸取面板庫預設（24 欄撰寫）
@@ -1198,9 +1218,9 @@ export const LAYOUT_PRESETS: { name: string; desc: string; workspace: Workspace 
 
 // v3 = 288 欄基準；v2（24 欄）保留原樣供舊版 app 降版使用，讀到時
 // 無損升階。profiles 同理。
-const WS_KEY = 'sj-pro-workspace-v3';
+const WS_KEY = marketOnly ? 'sj-pro-market-workspace-v1' : 'sj-pro-workspace-v3';
 const WS_KEY_LEGACY = 'sj-pro-workspace-v2';
-const PROFILES_KEY = 'sj-pro-profiles-v2';
+const PROFILES_KEY = marketOnly ? 'sj-pro-market-profiles-v1' : 'sj-pro-profiles-v2';
 const PROFILES_KEY_LEGACY = 'sj-pro-profiles-v1';
 
 function validWorkspace(w: unknown): w is Workspace {
@@ -1317,7 +1337,7 @@ export function loadWorkspace(): Workspace {
     }
     try {
         // 舊 24 欄存檔 → ×12 無損升階（v2 key 原樣保留，降版安全）
-        const legacy = localStorage.getItem(WS_KEY_LEGACY);
+        const legacy = !marketOnly && localStorage.getItem(WS_KEY_LEGACY);
         if (legacy) {
             const w = JSON.parse(legacy);
             if (validWorkspace(w)) return sanitizeWorkspace(upscaleLegacyWorkspace(stripCarry(w)));
@@ -1381,7 +1401,7 @@ export function loadProfiles(): Profile[] {
         // fall through to legacy
     }
     try {
-        const legacy = localStorage.getItem(PROFILES_KEY_LEGACY);
+        const legacy = !marketOnly && localStorage.getItem(PROFILES_KEY_LEGACY);
         if (legacy) {
             const out = parse(legacy, true);
             if (out) return out;

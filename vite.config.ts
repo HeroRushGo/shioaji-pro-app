@@ -9,6 +9,7 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, loadEnv, searchForWorkspaceRoot } from 'vite';
 import { configDefaults } from 'vitest/config';
 import { etfMetadataProxyPlugin } from './scripts/dev-etf-proxy';
+import { researchDataPlugin } from './scripts/research-data/plugin';
 
 // closed-source modules (AI Agent, future tiered features) live in the
 // private repo, checked out into ./modules on desktop builds; open-source
@@ -27,6 +28,15 @@ const pkg = JSON.parse(
 
 export default defineConfig(({ mode, command }) => {
     const env = loadEnv(mode, process.cwd(), '');
+    const market = mode === 'market';
+    if (market && [env.VITE_API_BASE, env.VITE_STREAM_BASE, env.VITE_BASE].some(Boolean)) throw new Error('market profile requires same-origin API/SSE and root base');
+    if (market && ((env.VITE_DEV_SERVER_PORT && env.VITE_DEV_SERVER_PORT !== '21323')
+        || (env.VITE_API_TARGET && env.VITE_API_TARGET !== 'http://127.0.0.1:21323')
+        || (process.env.PORT && process.env.PORT !== '5173'))) throw new Error('market profile ports are fixed');
+    const marketHeaders = market ? {
+        'Content-Security-Policy': "connect-src 'self' ws://127.0.0.1:5173; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        'X-Content-Type-Options': 'nosniff',
+    } : undefined;
     const devPort = command === 'serve' ? env.VITE_DEV_SERVER_PORT : undefined;
     const isolatedApi = devPort ? `http://127.0.0.1:${Number(devPort)}` : undefined;
     if (devPort && (!Number.isInteger(Number(devPort)) || Number(devPort) < 1024 || Number(devPort) > 65535)) {
@@ -115,7 +125,7 @@ export default defineConfig(({ mode, command }) => {
                     .trim(),
             ),
         },
-        plugins: [vanillaExtractPlugin(), react(), etfMetadataProxyPlugin()],
+        plugins: [researchDataPlugin(__dirname), vanillaExtractPlugin(), react(), etfMetadataProxyPlugin()],
         test: {
             // The desktop overlay is mirrored here for Tauri dev/CI, but its
             // Rust-adjacent Node tests use node:test rather than Vitest.
@@ -136,7 +146,9 @@ export default defineConfig(({ mode, command }) => {
             // default stays 5173 for tauri dev. Bind loopback only so Vite
             // is never exposed to the LAN.
             host: '127.0.0.1',
-            port: Number(process.env.PORT) || 5173,
+            port: market ? 5173 : Number(process.env.PORT) || 5173,
+            strictPort: market,
+            headers: marketHeaders,
             fs: {
                 allow: [searchForWorkspaceRoot(process.cwd()), modulesAllowDir],
             },
@@ -144,9 +156,9 @@ export default defineConfig(({ mode, command }) => {
                 // dev 打自帶 sidecar（scripts/dev-api.sh，與 CI 打包同版
                 // binary、port 21322）— 確保 API/UI 版本相符，不依賴使用
                 // 者自裝在 8080 的 CLI。要打別台時用 VITE_API_TARGET 蓋掉
-                '/api': env.VITE_API_TARGET ?? isolatedApi ?? 'http://127.0.0.1:21322',
+                '/api': market ? 'http://127.0.0.1:21323' : env.VITE_API_TARGET ?? isolatedApi ?? 'http://127.0.0.1:21322',
             },
         },
-        preview: { host: '127.0.0.1' },
+        preview: { host: '127.0.0.1', ...(market ? { port: 5173, strictPort: true, headers: marketHeaders, proxy: { '/api': 'http://127.0.0.1:21323' } } : {}) },
     };
 });

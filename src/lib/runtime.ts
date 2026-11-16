@@ -1,5 +1,6 @@
 // src/lib/runtime.ts — environment detection (zero dependencies; safe to
 // import from anywhere without cycles)
+import { marketOnly } from './market-profile';
 
 export const isTauri =
     typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -34,6 +35,7 @@ export const EXPECTED_SERVER_VERSION: string =
 const PORT_KEY = 'sj-pro-api-port';
 
 export function getApiPort(): number {
+    if (marketOnly) return 21323;
     const fixed = getDevServerPort();
     if (fixed) return fixed;
     try {
@@ -64,6 +66,7 @@ export type ApiScheme = 'http' | 'https';
 const SCHEME_KEY = 'sj-pro-api-scheme';
 
 export function getApiScheme(): ApiScheme {
+    if (marketOnly) return 'http';
     try {
         if (localStorage.getItem(SCHEME_KEY) === 'https') return 'https';
     } catch {
@@ -145,6 +148,7 @@ export {
 // with 本機 HTTPS enabled the mkcert certificate covers it alongside
 // localhost and ::1.
 export function getApiBase(): string {
+    if (marketOnly) return '';
     const env = import.meta.env.VITE_API_BASE as string | undefined;
     if (getDevServerPort() && env && env !== `${getApiScheme()}://127.0.0.1:${getDevServerPort()}`) {
         throw new Error('隔離 dev 服務與 VITE_API_BASE 不一致，拒絕連線');
@@ -159,6 +163,7 @@ export function getApiBase(): string {
 // concern and streams share the API origin. (Before, six per-channel
 // streams needed a sibling-loopback-origin workaround in dev.)
 export function getStreamBase(): string {
+    if (marketOnly) return '';
     const env = import.meta.env.VITE_STREAM_BASE as string | undefined;
     if (getDevServerPort() && env) {
         const direct = `${getApiScheme()}://127.0.0.1:${getDevServerPort()}`;

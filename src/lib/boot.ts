@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { marketOnly } from './market-profile';
 import { createAccountQuery } from './account-query';
 // src/lib/boot.ts — startup orchestration:
 // 1. Desktop: auto-start the bundled shioaji server when keys are saved.
@@ -169,6 +170,19 @@ function installKeyboardFocusHeal() {
 export function bootstrap() {
     if (booted) return;
     booted = true;
+    if (marketOnly) {
+        // Market profile never enters account adoption, trade reports,
+        // strategy schedulers or native sidecar management.
+        const connect = async (): Promise<void> => {
+            try {
+                const [health, info] = await Promise.all([fetchHealth(), fetchInfo()]);
+                if (!serverHealthReady(health) || info.version !== EXPECTED_SERVER_VERSION || info.simulation !== false) throw new Error('market backend not ready');
+                ensureStream();
+            } catch { window.setTimeout(() => void connect(), 5000); }
+        };
+        void connect();
+        return;
+    }
     watchProtectionEnv();
     if (isTauri && !isChildWindow()) setServerIdentityVerified(false);
     installKeyboardFocusHeal();
