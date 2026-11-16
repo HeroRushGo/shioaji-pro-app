@@ -10,10 +10,10 @@
 
 ```sh
 cd ~/Documents/Trading/scripts/shioaji-pro-web.wt/full-market
-pnpm dev:market
+/bin/zsh scripts/run-market.zsh
 ```
 
-開啟 <http://127.0.0.1:5173/>。終端顯示 URL 前，會驗證官方 binary、receipt、後端版本、正式行情模式及真實 2330 合約查詢。停止時在該終端按 Ctrl-C；只回收本次啟動的三個程序群組。已有服務占用 5173、21323 或 21324 時會拒絕啟動，絕不接手或改用其他埠。不得以此腳本管理正式 21322、8080 或 neo-dash 8788。
+也可在 pnpm 10 環境用 `pnpm dev:market`；本機若裝 pnpm 11，直接用上面的 zsh 命令可避免它在 run 前自動重建 pnpm 10 的 node_modules。開啟 <http://127.0.0.1:5173/>。終端顯示 URL 前，會驗證官方 binary、receipt、後端版本、正式行情模式及真實 2330 合約查詢。停止時在該終端按 Ctrl-C；只回收本次啟動的三個程序群組。已有服務占用 5173、21323 或 21324 時會拒絕啟動，絕不接手或改用其他埠。不得以此腳本管理正式 21322、8080 或 neo-dash 8788。
 
 服務關係：5173 完整 Pro → 21323 行情閘道 → 21324 帶 Bearer 驗證的 Shioaji 1.7.11。API 金鑰只在後端程序記憶體／必要的 SDK 子程序環境，不交給 Vite 或瀏覽器。原始 CLI 的 UDS 停用。行情模式的 API/SSE 固定同源，不採用舊 localStorage 的服務位址；dev/preview 皆 strictPort。
 
