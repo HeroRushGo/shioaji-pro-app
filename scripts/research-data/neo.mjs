@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -161,11 +161,110 @@ async function checkedRepoState(repo) {
     return commit;
 }
 
+/**
+ * Own one fixed offline helper until both the process and all its pipes close.
+ * The timing arguments are an internal test seam; the production caller keeps
+ * its existing ten-minute deadline and never accepts a helper path from CLI.
+ */
+export function runOfflineNeoHelper(python, input, { timeoutMs = 10 * 60_000, killGraceMs = 1_000 } = {}) {
+    if (typeof python !== 'string' || !path.isAbsolute(python)) fail('--python must explicitly name the existing neo venv interpreter');
+    for (const value of [timeoutMs, killGraceMs]) {
+        if (!Number.isInteger(value) || value <= 0 || value > 2_147_483_647) fail('invalid helper supervision timer');
+    }
+    const serialized = JSON.stringify(input);
+    const helper = fileURLToPath(new URL('./neo-export.py', import.meta.url));
+    return new Promise((resolve, reject) => {
+        // A separate POSIX process group confines signal forwarding to this
+        // owned helper and any short-lived git checks it currently runs.
+        const grouped = process.platform !== 'win32';
+        const child = spawn(python, ['-P', '-B', helper], {
+            detached: grouped, stdio: ['pipe', 'pipe', 'pipe'],
+            env: { HOME: os.homedir(), PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', TZ: 'Asia/Taipei', PYTHONDONTWRITEBYTECODE: '1' },
+        });
+        const maxBuffer = 128 * 1024 * 1024;
+        const stdout = [], stderr = [];
+        let stdoutSize = 0, stderrSize = 0, stopReason, killTimer;
+        let closed = false;
+        const error = (message, code, signal) => Object.assign(new Error(message), { code, ...(signal ? { signal } : {}) });
+        const send = signal => {
+            if (!child.pid) return;
+            try {
+                if (grouped) process.kill(-child.pid, signal);
+                else child.kill(signal);
+            } catch (failure) {
+                // ESRCH means the OS already removed the process/group. Wait
+                // for close either way; a sent signal alone is not reaping.
+                if (failure.code !== 'ESRCH' && stopReason) stopReason.killFailure = failure.code;
+            }
+        };
+        const stop = reason => {
+            if (closed) return;
+            if (stopReason) { send('SIGKILL'); return; }
+            stopReason = reason;
+            clearTimeout(deadline);
+            child.stdin?.destroy();
+            send('SIGTERM');
+            // SIGTERM is catchable. Escalate rather than leaving a helper
+            // that ignores it alive after the parent's deadline disappears.
+            killTimer = setTimeout(() => send('SIGKILL'), killGraceMs);
+        };
+        const onSignal = signal => stop(error(`neo offline helper interrupted by ${signal}`, 'NEO_HELPER_INTERRUPTED', signal));
+        const onError = failure => {
+            if (!stopReason) stop(error(`neo offline helper failed: ${failure.message}`, 'NEO_HELPER_PROCESS_ERROR'));
+        };
+        const collect = (target, chunk, stream) => {
+            if (stopReason) return; // drain, but never accept payload after stop
+            if (stream === 'stdout') stdoutSize += chunk.length;
+            else stderrSize += chunk.length;
+            if (stdoutSize > maxBuffer || stderrSize > maxBuffer) {
+                stop(error('neo offline helper exceeded its output limit', 'NEO_HELPER_OUTPUT_LIMIT'));
+            } else target.push(chunk);
+        };
+        const onStdout = chunk => collect(stdout, chunk, 'stdout');
+        const onStderr = chunk => collect(stderr, chunk, 'stderr');
+        const deadline = setTimeout(() => stop(error('neo offline helper timed out', 'NEO_HELPER_TIMEOUT')), timeoutMs);
+        process.on('SIGINT', onSignal);
+        process.on('SIGTERM', onSignal);
+        child.on('error', onError);
+        child.stdin?.on('error', onError);
+        child.stdout?.on('error', onError);
+        child.stderr?.on('error', onError);
+        child.stdout?.on('data', onStdout);
+        child.stderr?.on('data', onStderr);
+        child.once('close', (code, signal) => {
+            closed = true;
+            // A surviving descendant must not keep inherited pipes or work
+            // alive after an interrupted group leader has exited.
+            if (stopReason && grouped) send('SIGKILL');
+            clearTimeout(deadline);
+            clearTimeout(killTimer);
+            process.removeListener('SIGINT', onSignal);
+            process.removeListener('SIGTERM', onSignal);
+            child.removeListener('error', onError);
+            child.stdout?.removeListener('data', onStdout);
+            child.stderr?.removeListener('data', onStderr);
+            for (const stream of [child.stdin, child.stdout, child.stderr]) {
+                stream?.removeListener('error', onError);
+                stream?.destroy();
+            }
+            // Only close proves the process has ended AND stdio is closed.
+            if (stopReason) { reject(stopReason); return; }
+            if (code !== 0) {
+                reject(error(`neo offline helper failed: ${Buffer.concat(stderr).toString('utf8').trim().slice(-8192) || `exit ${code ?? signal}`}`,
+                    'NEO_HELPER_EXIT', signal));
+                return;
+            }
+            try { resolve(JSON.parse(Buffer.concat(stdout).toString('utf8'))); }
+            catch { reject(error('neo offline helper returned invalid JSON', 'NEO_HELPER_INVALID_JSON')); }
+        });
+        child.stdin?.end(serialized);
+    });
+}
+
 async function offlineRead(options, request) {
     const neoCommit = await checkedRepoState(options.neoRepo);
     if (options.neoCommit && options.neoCommit !== neoCommit) fail('neo-client HEAD differs from the requested pin');
     if (typeof options.python !== 'string' || !path.isAbsolute(options.python)) fail('--python must explicitly name the existing neo venv interpreter');
-    const helper = fileURLToPath(new URL('./neo-export.py', import.meta.url));
     const input = {
         schemaVersion: 1, neoRepo: options.neoRepo, neoCommit,
         dbPath: options.dbPath ?? path.join(os.homedir(), '.neo-watch/tick-store.duckdb'),
@@ -174,16 +273,7 @@ async function offlineRead(options, request) {
         symbols: request.symbols.map(item => item.symbol), dates: request.dates,
         samplingMinutes: request.samplingMinutes,
     };
-    const result = await new Promise((resolve, reject) => {
-        const child = execFile(options.python, ['-P', '-B', helper], {
-            env: { HOME: os.homedir(), PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', TZ: 'Asia/Taipei', PYTHONDONTWRITEBYTECODE: '1' },
-            timeout: 10 * 60_000, maxBuffer: 128 * 1024 * 1024,
-        }, (error, stdout, stderr) => {
-            if (error) { reject(new Error(`neo offline helper failed: ${stderr.trim() || error.message}`)); return; }
-            try { resolve(JSON.parse(stdout)); } catch { reject(new Error('neo offline helper returned invalid JSON')); }
-        });
-        child.stdin.end(JSON.stringify(input));
-    });
+    const result = await runOfflineNeoHelper(options.python, input);
     if (await checkedRepoState(options.neoRepo) !== neoCommit) fail('neo-client HEAD changed while exporting');
     if (result.neoCommit !== neoCommit || result.schemaVersion !== 1 || result.adapterVersion !== NEO_ADAPTER_VERSION
         || !DIGEST.test(result.sourceFingerprint ?? '')) fail('offline helper version receipt mismatch');
@@ -283,5 +373,8 @@ function argumentsFor(argv) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     materializeNeo(argumentsFor(process.argv.slice(2))).then(result => {
         console.log(JSON.stringify({ published: result.published, release: result.release?.id, missing: result.missing, evidence: result.evidence }, null, 2));
-    }).catch(error => { console.error(error.message); process.exitCode = 1; });
+    }).catch(error => {
+        console.error(error.message);
+        process.exitCode = error.signal === 'SIGINT' ? 130 : error.signal === 'SIGTERM' ? 143 : 1;
+    });
 }

@@ -9,6 +9,7 @@
 - finance/replay 的 release 各自獨立，catalog 由排他 writer lock、完整 staging、原子 rename 發布；舊 release 永不改寫，失敗保留原 catalog。重跑同源同內容保留首次成功取得時間。catalog 含撤回 ID，所有歷史查詢與手動回退均套用撤回；離線僅代表截至本機最後同步的狀態。
 - Vite dev 和 preview 同一讀取邊界；build 僅複製 catalog 及其列名的驗 hash 資料，不能複製整個資料目錄、上游原始檔或 store。CSP connect-src 只開同源（dev另有既有HMR），禁止原版/admin文件導航維持。
 - 撤回紀錄持久存於獨立 `withdrawals.json`，不屬於可回退的catalog；只單調累加，未知上游撤回另外封鎖該dataset的後續發布，須人工核對才能恢復。已有catalog但ledger缺失/損壞/不可讀時拒絕服務；發布先寫ledger再切catalog。服務啟動與每次讀取均套用ledger，包含直接舊 URL，不只依賴 UI 選版。preview 在已打包清單上再疊本機最新撤回，catalog回退及服務重啟均不可復活舊檔。build攜帶ledger但不複製撤回payload。已下載或未再同步的離線副本無法追溯撤回，須停止提供或重建；不宣稱對純靜態離線副本能即時撤回。`/@fs`、`.research-data` 路徑直讀均拒絕，瀏覽器只走核准同源讀取介面。
+- 讀取 middleware 在任何 static fallback 前，先以有界解碼與 URI 路徑正規化辨識資料 namespace；只有 literal canonical `/research-data/...` 可進核准讀取，encoded prefix、dot／slash alias、query 或 ambiguous target 都拒絕，不交由 Vite 靜態服務再次解碼。
 
 ## 本機資料契約 v1
 
@@ -23,6 +24,8 @@ EPS 取上游 `income_quarter`，basis 只允許 `quarter_reported_q1`（第一�
 重播 payload：`{schemaVersion:1,kind:'replay',releaseId,symbol,name,market,date,firstSeenAt,neoCommit,samplingMinutes,provenance,points}`；`points=[{time:HH:mm,price:number|null,vwap:number|null,poc:number|null}]`。每個點必須是其 HH:mm:00+08:00 的 neo 前綴結果；POC 不能使用全日結果。provenance 保留確切本機讀端、輸出時間、來源/覆蓋/資格資訊與已核對版本，不包含帳務、憑證、原始逐筆或五檔。匯出只限過去交易日；資料缺漏保持空，不查SDK補齊。
 
 neo 使用隔離離線 reader 的三個既有 GET，不開 listener：session、bars(as_of=HH:mm:00)、VP(as_of=HH:mm:00)，預設30分鐘採樣。逐分鐘 developing 的時間是桶首但包含整分鐘，不作精確時點讀數。執行前後驗 clean neo HEAD、實際 import 路徑與程式 fingerprint，DB 的 realpath／inode／size／mtime_ns／ctime_ns 前後不變；session來源資訊前後一致。任一來源變動整份拒收。所有DuckDB開啟 read_only，外連雙重tripwire，不安裝依賴、不修改neo碼、不長持鎖干擾既有寫者。
+
+Node持有固定Python helper直到process及stdio的close。可捕捉的SIGINT／SIGTERM及既有10分鐘deadline觸發後，僅終止本次自有process group，先TERM、1秒寬限後KILL，等收束才拒絕；停止後的JSON不發布。正常及異常都移除自己的timer／signal listener／pipes，不改其他listener。以不讀DB的慢速假helper驗父子PID、graceful等待、忽略TERM、timeout及normal path。
 
 ## 查詢與時間
 

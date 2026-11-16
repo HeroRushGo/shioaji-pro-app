@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { materializeNeo, neoSampleTimes } from './neo.mjs';
+import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { materializeNeo, neoSampleTimes, runOfflineNeoHelper } from './neo.mjs';
 import { readCatalog, readDataFile } from './store.mjs';
 
 const neoCommit = 'a'.repeat(40);
@@ -206,4 +208,148 @@ test('a repair or source change during a batch is rejected before publication', 
     });
     await assert.rejects(materializeNeo({ ...base, root, readerFn: source }), /source or coverage changed/);
     assert.deepEqual((await readCatalog(root)).replayReleases, []);
+});
+
+async function waitForFile(filename, milliseconds = 5_000) {
+    const until = Date.now() + milliseconds;
+    while (Date.now() < until) {
+        try { return await fs.readFile(filename, 'utf8'); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        await delay(10);
+    }
+    throw new Error(`Timed out waiting for owned helper fixture ${path.basename(filename)}`);
+}
+
+function processExists(pid) {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+}
+
+async function supervisedFixture(t, mode) {
+    const root = await temporary(t);
+    const names = Object.fromEntries(['pid', 'args', 'term', 'outcome', 'published'].map(name => [name, path.join(root, name)]));
+    const fakePython = path.join(root, 'fake-python.mjs');
+    // This executable never imports Python, neo-client, or a database. It
+    // accepts the production interpreter argv and simulates slow/ignored TERM.
+    await fs.writeFile(fakePython, `#!${process.execPath}\n`
+        + `import fs from 'node:fs';\n`
+        + `const files = ${JSON.stringify(names)};\n`
+        + `fs.writeFileSync(files.pid, String(process.pid));\n`
+        + `fs.writeFileSync(files.args, JSON.stringify(process.argv.slice(2)));\n`
+        + `process.stdin.resume();\n`
+        + `if (${JSON.stringify(mode)} === 'normal') setTimeout(() => console.log(JSON.stringify({ complete: true })), 20);\n`
+        + `else {\n`
+        + `  const keepAlive = setInterval(() => {}, 1000);\n`
+        + `  process.on('SIGTERM', () => {\n`
+        + `    fs.writeFileSync(files.term, 'TERM received');\n`
+        + `    console.log(JSON.stringify({ complete: true, afterStop: true }));\n`
+        + `    if (${JSON.stringify(mode)} !== 'timeout') setTimeout(() => { clearInterval(keepAlive); process.exitCode = 0; }, 500);\n`
+        + `  });\n`
+        + `}\n`, { mode: 0o700 });
+    const runnerPath = path.join(root, 'runner.mjs');
+    await fs.writeFile(runnerPath,
+        `import fs from 'node:fs';\n`
+        + `import { runOfflineNeoHelper } from ${JSON.stringify(new URL('./neo.mjs', import.meta.url).href)};\n`
+        + `const files = ${JSON.stringify(names)};\n`
+        + `let unrelatedSignals = 0;\n`
+        + `const sentinel = () => { unrelatedSignals++; };\n`
+        + `process.on('SIGINT', sentinel); process.on('SIGTERM', sentinel);\n`
+        + `const before = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));\n`
+        + `let outcome;\n`
+        + `try {\n`
+        + `  const value = await runOfflineNeoHelper(${JSON.stringify(fakePython)}, { fixture: true }, { timeoutMs: ${mode === 'timeout' ? 1_000 : 5_000}, killGraceMs: ${mode === 'timeout' ? 100 : 1_000} });\n`
+        + `  fs.writeFileSync(files.published, JSON.stringify(value));\n`
+        + `  outcome = { success: true, value };\n`
+        + `} catch (error) {\n`
+        + `  outcome = { success: false, code: error.code, signal: error.signal };\n`
+        + `  process.exitCode = error.signal === 'SIGINT' ? 130 : error.signal === 'SIGTERM' ? 143 : 1;\n`
+        + `}\n`
+        + `const pid = Number(fs.readFileSync(files.pid, 'utf8'));\n`
+        + `try { process.kill(pid, 0); outcome.childGone = false; } catch (error) { if (error.code !== 'ESRCH') throw error; outcome.childGone = true; }\n`
+        + `outcome.before = before; outcome.after = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));\n`
+        + `outcome.unrelatedSignals = unrelatedSignals;\n`
+        + `outcome.openTimeouts = process.getActiveResourcesInfo().filter(type => type === 'Timeout').length;\n`
+        + `fs.writeFileSync(files.outcome, JSON.stringify(outcome));\n`);
+    const startedAt = Date.now();
+    const runner = spawn(process.execPath, [runnerPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { HOME: os.homedir(), PATH: '/usr/bin:/bin', LANG: 'en_US.UTF-8', TZ: 'Asia/Taipei' },
+    });
+    let stderr = '', helperPid;
+    runner.stderr.on('data', chunk => { stderr += chunk; });
+    runner.stdout.resume();
+    const closed = new Promise((resolve, reject) => {
+        runner.once('error', reject);
+        runner.once('close', (code, signal) => resolve({ code, signal, elapsed: Date.now() - startedAt }));
+    });
+    t.after(async () => {
+        // Failure cleanup only targets PIDs created and recorded by this test.
+        if (helperPid && processExists(helperPid)) process.kill(helperPid, 'SIGKILL');
+        if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
+        await closed.catch(() => {});
+    });
+    helperPid = Number(await waitForFile(names.pid));
+    assert.ok(Number.isInteger(helperPid) && helperPid > 0);
+    return { names, runner, helperPid, closed, stderr: () => stderr };
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+    test(`offline supervisor forwards ${signal} and waits for helper/pipes before rejecting`, { timeout: 10_000 }, async t => {
+        const fixture = await supervisedFixture(t, signal);
+        fixture.runner.kill(signal);
+        await waitForFile(fixture.names.term);
+        assert.equal(processExists(fixture.helperPid), true, 'fake helper must still be in its graceful shutdown delay');
+        assert.equal(processExists(fixture.runner.pid), true, 'parent exited before helper shutdown');
+        await assert.rejects(fs.access(fixture.names.outcome), { code: 'ENOENT' });
+        const exit = await fixture.closed;
+        assert.equal(exit.code, signal === 'SIGINT' ? 130 : 143, fixture.stderr());
+        assert.equal(exit.signal, null);
+        const outcome = JSON.parse(await fs.readFile(fixture.names.outcome, 'utf8'));
+        assert.equal(outcome.code, 'NEO_HELPER_INTERRUPTED');
+        assert.equal(outcome.signal, signal);
+        assert.equal(outcome.childGone, true);
+        assert.deepEqual(outcome.after, outcome.before, 'supervisor leaked or removed another signal listener');
+        assert.equal(outcome.unrelatedSignals, 1);
+        assert.equal(outcome.openTimeouts, 0, 'supervisor left a deadline or kill timer alive');
+        assert.equal(processExists(fixture.helperPid), false);
+        await assert.rejects(fs.access(fixture.names.published), { code: 'ENOENT' });
+    });
+}
+
+test('offline supervisor escalates a timed-out helper that ignores TERM and never publishes its output', { timeout: 10_000 }, async t => {
+    const fixture = await supervisedFixture(t, 'timeout');
+    const exit = await fixture.closed;
+    assert.equal(exit.code, 1, fixture.stderr());
+    assert.equal(await fs.readFile(fixture.names.term, 'utf8'), 'TERM received');
+    const outcome = JSON.parse(await fs.readFile(fixture.names.outcome, 'utf8'));
+    assert.equal(outcome.code, 'NEO_HELPER_TIMEOUT');
+    assert.equal(outcome.childGone, true);
+    assert.deepEqual(outcome.after, outcome.before);
+    assert.equal(outcome.unrelatedSignals, 0);
+    assert.equal(outcome.openTimeouts, 0);
+    assert.equal(processExists(fixture.helperPid), false);
+    await assert.rejects(fs.access(fixture.names.published), { code: 'ENOENT' });
+});
+
+test('offline supervisor normal completion reaps helper and clears its deadline/listeners', { timeout: 10_000 }, async t => {
+    const fixture = await supervisedFixture(t, 'normal');
+    const exit = await fixture.closed;
+    assert.equal(exit.code, 0, fixture.stderr());
+    const outcome = JSON.parse(await fs.readFile(fixture.names.outcome, 'utf8'));
+    assert.deepEqual(outcome.value, { complete: true });
+    assert.equal(outcome.childGone, true);
+    assert.deepEqual(outcome.after, outcome.before);
+    assert.equal(outcome.unrelatedSignals, 0);
+    assert.equal(outcome.openTimeouts, 0, 'normal completion retained its deadline');
+    const args = JSON.parse(await fs.readFile(fixture.names.args, 'utf8'));
+    assert.deepEqual(args.slice(0, 2), ['-P', '-B']);
+    assert.equal(path.basename(args[2]), 'neo-export.py', 'production helper path must remain fixed');
+    assert.equal(processExists(fixture.helperPid), false);
+    assert.deepEqual(JSON.parse(await fs.readFile(fixture.names.published, 'utf8')), { complete: true });
+});
+
+test('offline supervisor spawn failure also removes its signal listeners', async () => {
+    const before = ['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal));
+    await assert.rejects(runOfflineNeoHelper(path.join(os.tmpdir(), 'no-such-neo-python'), {}), { code: 'NEO_HELPER_PROCESS_ERROR' });
+    assert.deepEqual(['SIGINT', 'SIGTERM'].map(signal => process.listenerCount(signal)), before);
 });

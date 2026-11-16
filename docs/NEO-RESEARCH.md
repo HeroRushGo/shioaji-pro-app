@@ -91,6 +91,8 @@ pnpm research:neo \
 
 `--neo-repo`、`--python` 必須為絕對路徑，指定 commit 必須符合該 checkout 的 clean HEAD。若 HEAD 已演進，先核對新版本相容性再更新 pin，不能為了讓指令通過而略過檢查。日期必須早於台北今天；請選既有資料涵蓋的過去交易日，沒有 ticks 的日期維持缺資料。CLI 代號目前限上述四個已核對商品身分。預設讀取既有 store A/B，缺少的來源不靠 SDK 補齊。
 
+匯出期間用 Ctrl+C／SIGINT 或 SIGTERM 停止時，Node 會終止自己的 Python process group，先 TERM、1 秒寬限後 KILL，等待程序與管線結束再退出（SIGINT 為130、SIGTERM 為143）；停止後不發布 JSON。正常完成也會清理自己的 timer／listener。既有匯出 deadline 仍為10分鐘，timeout 同樣等待 helper 收束，不只停止父程式。
+
 匯出以子程序中的隔離 ASGI reader 呼叫既有 session、bars(as_of=HH:mm:00)、VP(as_of=HH:mm:00) 三種窄 GET。**不啟動 reader listener、不連既有 8787／8788、不重啟 8788、不登入券商、不修改 neo 原始碼、不執行依賴安裝。** 所有 DuckDB 連線為 read_only；來源程式、DB/WAL 指紋及 session 來源前後核對，任一來源變動就拒收整份匯出。輸出只含核准衍生值及來源／覆蓋資訊，不含帳務、原始逐筆或五檔。
 
 ## 撤回、回退與離線範圍
@@ -99,7 +101,7 @@ finance/replay 各自以不可變 release 保存，完整 staging 驗證後才�
 
 - 已有 catalog 卻缺少、損壞或無法讀取 withdrawals ledger 時，讀取 fail-closed，不繼續服務舊資料。
 - 未知上游撤回會封鎖相關 dataset 的後續發布，必須人工核對原因與權利狀態才能恢復；不要刪除 ledger、複製舊 catalog 或重新發布舊 release 來繞過封鎖。
-- dev 每次讀取套用撤回集合，直接舊 payload URL 也不能繞過。preview 只服務已打包清單，再疊加本機最新撤回；build 帶 ledger，並不複製撤回 payload。
+- dev 每次讀取套用撤回集合，直接舊 payload URL 也不能繞過。preview 只服務已打包清單，再疊加本機最新撤回；build 帶 ledger，並不複製撤回 payload。讀取守門在 static fallback 前辨識 encoded／正規化別名，只有 literal canonical 資料 URL 可用；不能以編碼目錄、重複 slash 或 dot segment 跳過撤回。
 - 已下載的舊 build、或不再同步的純靜態離線副本，無法保證追溯撤回。得知撤回後應停止提供相關副本或重新建立合格 build，不能把本機 preview 的撤回機制宣稱成離線即時撤回。
 
 ## 資料與網路界線
