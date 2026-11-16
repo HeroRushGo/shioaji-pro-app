@@ -30,7 +30,7 @@ export class MarketEvents extends Transform {
             if (data.length) {
                 try {
                     const parsed = JSON.parse(data.map(line => line.slice(5).trimStart()).join('\n'));
-                    this.push(`event: ${names[0]}\ndata: ${JSON.stringify(projectMarketEvent(parsed))}\n\n`);
+                    this.push(`event: ${names[0]}\ndata: ${JSON.stringify(projectMarketEvent(parsed, names[0]))}\n\n`);
                 } catch { /* Malformed market data cannot cross the projection. */ }
             }
         }

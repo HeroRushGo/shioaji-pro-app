@@ -99,6 +99,20 @@ def wait_backend(children, authorization):
     raise RuntimeError("backend startup timeout")
 
 
+def cleanup_runtime(children, session_home, log, lock, grace=8):
+    # Once shutdown begins, repeated Ctrl-C/TERM must not interrupt escalation
+    # or SDK-state cleanup. Restore the caller's handlers only after completion.
+    previous = {sig: signal.signal(sig, signal.SIG_IGN) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        stop_children(children, grace=grace)
+        shutil.rmtree(session_home)
+    finally:
+        log.close()
+        lock.close()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def run(vault):
     repo = Path(__file__).resolve().parent.parent
     env = clean_environment(os.environ)
@@ -144,7 +158,12 @@ def run(vault):
     log = log_path.open("a")
     os.chmod(log_path, 0o600)
     children = []
+    shutdown_started = False
     def interrupted(_signum, _frame):
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -169,10 +188,8 @@ def run(vault):
             time.sleep(1)
         raise RuntimeError("owned child exited; stack rolled back")
     finally:
-        stop_children(children)
-        log.close()
-        lock.close()
-        shutil.rmtree(session_home)
+        shutdown_started = True
+        cleanup_runtime(children, session_home, log, lock)
 
 
 if __name__ == "__main__":

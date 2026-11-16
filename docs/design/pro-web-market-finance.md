@@ -22,6 +22,12 @@ Main owns launcher, gateway, API/runtime/boot/main and market UI state (credenti
 
 ## Acceptance and runbook
 
+### Done review r1 resolution
+
+The first fixed-head done review rejected three compatibility/lifecycle gaps. The follow-up uses the actual `shioaji.ts` request contracts, including index/stocks/scanner selectors, all contract-search query keys, and both index-components subscription directions. Fake-upstream tests now forward these exact frontend request bodies through the HTTP gateway, while forbidden authority routes still record zero upstream calls. SSE projection selects public schemas by family, retains typed contract/projection identity, scanner quote/diagnostic scalar maps, and both named gaps and the original scanner-family dropped_count format. Existing parseScannerMessages/parseIcEvent/normalizeIndexQuote/parseKbarEvent consumers are exercised after projection using upstream retained raw fixtures. Kbar schemas retain the four documented wrapper aliases and root batches, plus the existing parser-supported ts timestamp alias; no net values are synthesized. ScannerExtra is an explicit public scalar dictionary; nested objects and credential/account-like keys are removed.
+
+Shutdown coalesces repeated signals immediately and ignores SIGINT/TERM throughout group escalation, file closure and session removal. A subprocess regression sends an initial SIGINT followed by SIGINT+TERM during the cleanup grace period, proving the owned ignoring child is killed, private session removed, and an unrelated process survives. The earlier leader-exit/grandchild regression remains. Each revision requires a new clean fixed-head receipt and independent done review before delivery.
+
 ### Plan review resolution (2026-11-17)
 
 The independent plan review requested three concrete contracts. They are now fixed in `src/lib/market-policy.mjs`: explicit market GET/POST paths, finite query keys with bounded values, top-level/nested contract JSON field allowlists, and explicit public SSE families with a bounded recursive public-field projection. Unknown parameters and metadata are rejected or dropped, never passed to a broker route. Gateway metadata projections use the pathname (including requests with query parameters). Tests exercise a fake upstream and prove zero forwarded requests for authority routes, ambiguous paths, invalid Host/Origin/Fetch Metadata, and unknown body keys.

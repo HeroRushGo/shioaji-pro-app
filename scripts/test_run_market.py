@@ -15,6 +15,48 @@ spec.loader.exec_module(market)
 
 
 class MarketLauncherTests(unittest.TestCase):
+    def test_repeated_interrupts_cannot_abort_group_or_session_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            script = root / 'supervisor.py'
+            script.write_text('''import importlib.util,os,signal,subprocess,sys,time,json
+from pathlib import Path
+root=Path(sys.argv[1]); session=root/'sdk'; session.mkdir()
+spec=importlib.util.spec_from_file_location('market',sys.argv[2]); market=importlib.util.module_from_spec(spec); spec.loader.exec_module(market)
+code="import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path(%r).write_text(str(os.getpid())); time.sleep(60)" % str(root/'child')
+child=subprocess.Popen([sys.executable,'-c',code],start_new_session=True)
+while not (root/'child').exists(): time.sleep(.01)
+original=market.stop_children
+def stop(children,grace):
+ (root/'cleaning').write_text('ready'); original(children,grace=grace)
+market.stop_children=stop
+def interrupted(*_): raise KeyboardInterrupt
+signal.signal(signal.SIGINT,interrupted); signal.signal(signal.SIGTERM,interrupted)
+(root/'ready').write_text('ready')
+try: signal.pause()
+except KeyboardInterrupt: pass
+finally: market.cleanup_runtime([child],session,(root/'log').open('a'),(root/'lock').open('a'),grace=.3)
+(root/'done').write_text('done')
+''')
+            supervisor = subprocess.Popen([sys.executable, str(script), folder, str(Path(market.__file__))], start_new_session=True)
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+            try:
+                for _ in range(100):
+                    if (root/'ready').exists(): break
+                    time.sleep(.02)
+                supervisor.send_signal(signal.SIGINT)
+                for _ in range(100):
+                    if (root/'cleaning').exists(): break
+                    time.sleep(.01)
+                supervisor.send_signal(signal.SIGINT)
+                supervisor.send_signal(signal.SIGTERM)
+                self.assertEqual(supervisor.wait(timeout=5), 0)
+                self.assertTrue((root/'done').exists())
+                self.assertFalse((root/'sdk').exists())
+                self.assertIsNone(unrelated.poll())
+            finally:
+                market.stop_children([supervisor, unrelated], grace=0)
+
     def test_occupied_port_fails_without_attaching_or_starting_a_process(self):
         probe = Mock()
         probe.bind.side_effect = OSError('fixture occupied')
