@@ -29,7 +29,8 @@ export function PanelChrome({
     pinnable?: boolean;
     pin?: string | null;
     currentCode?: string | null;
-    onPinChange?: (pin: string | null) => void;
+    /** Return false to reject an edited code and restore the current pin. */
+    onPinChange?: (pin: string | null) => void | boolean;
     onRemove?: () => void;
     onPopout?: () => void;
     /** 連動下拉（連動／群組 A／B／C／鎖定）；沒有時維持單一的連動／鎖定鈕 */
@@ -119,7 +120,7 @@ export function PanelChrome({
                             onChange={(e) => setEditCode(e.target.value)}
                             onKeyDown={(e) => {
                                 const code = editCode.trim().toUpperCase();
-                                if (e.key === 'Enter' && code) onPinChange(code);
+                                if (e.key === 'Enter' && code && onPinChange(code) === false) setEditCode(pin ?? '');
                             }}
                         />
                     )}
@@ -197,7 +198,7 @@ export function PanelChrome({
                                     const code = editCode
                                         .trim()
                                         .toUpperCase();
-                                    if (code) onPinChange(code);
+                                    if (code && onPinChange(code) === false) setEditCode(pin ?? '');
                                 }
                             }}
                         />

@@ -32,8 +32,10 @@ import {
 } from './workspace';
 
 export const WORKSPACE_SPEC_VERSION = 1 as const;
+// Fork-specific identity: its additive panel types must not replace a cached
+// upstream schema under the same ID. The URN does not imply a hosted endpoint.
 export const WORKSPACE_SPEC_SCHEMA_ID =
-    'https://github.com/Sinotrade/shioaji-pro-app/schemas/workspace-spec-v1.schema.json';
+    'urn:herorushgo:shioaji-pro-app:workspace-spec:neo-research:v1';
 export const WORKSPACE_SPEC_COLUMNS = [GRID_LEGACY_COLS, GRID_COLS] as const;
 export type WorkspaceSpecColumns = (typeof WORKSPACE_SPEC_COLUMNS)[number];
 export const WORKSPACE_SPEC_MAX_PANELS = 40;

@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+dist-research/
 
 # Python（scripts/ 的 release notes 工具與其測試）
 __pycache__/

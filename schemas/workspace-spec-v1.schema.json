@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/Sinotrade/shioaji-pro-app/schemas/workspace-spec-v1.schema.json",
+  "$id": "urn:herorushgo:shioaji-pro-app:workspace-spec:neo-research:v1",
   "title": "Shioaji Pro Workspace Spec v1",
   "description": "Agent-facing description of the visible workspace: panels, grid rectangles, link/pin state and whitelisted display settings. Never contains account keys, quantities or order settings. Structural rules the schema cannot express (overlaps, per-type minimum sizes, singletons, keeping the AI Agent panel, contract resolution) are enforced by validate_workspace_spec.",
   "type": "object",
@@ -83,6 +83,7 @@
             "pnl",
             "chips",
             "company",
+            "neo-research",
             "volprofile",
             "optchain",
             "stockfutures",

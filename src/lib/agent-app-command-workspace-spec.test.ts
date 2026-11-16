@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import Ajv2020 from 'ajv/dist/2020.js';
+import forkSchema from '../../schemas/workspace-spec-v1.schema.json';
+import upstreamSchema from '../../schemas/upstream-workspace-spec-v1.schema.json';
 
 import {
     AgentAppCommandError,
@@ -12,7 +15,7 @@ import type { AgentAppCommand } from './agent-contract';
 import type { ContractInfo } from './types/contract';
 import type { BlockType, Workspace } from './workspace';
 import { WorkspaceUndoHistory } from './workspace-history';
-import type { WorkspaceSpecV1 } from './workspace-spec';
+import { WORKSPACE_SPEC_SCHEMA_ID, type WorkspaceSpecV1 } from './workspace-spec';
 
 const contract = (code: string) =>
     ({ code, name: `Name ${code}`, security_type: 'STK' }) as ContractInfo;
@@ -87,7 +90,7 @@ describe('workspace spec commands', () => {
     it('get returns the spec, schema, catalog, viewport and no undo', async () => {
         const { run } = fixture();
         const result = await run({ name: 'get_workspace_spec', args: {} });
-        expect(result.schema).toContain('workspace-spec-v1');
+        expect(result.schema).toBe(WORKSPACE_SPEC_SCHEMA_ID);
         expect(result.spec.columns).toBe(24);
         expect(result.spec.panels[1]).toMatchObject({ id: 'chart-1', settings: { interval: '60m' } });
         expect(JSON.stringify(result)).not.toContain('0123456');
@@ -97,6 +100,21 @@ describe('workspace spec commands', () => {
         const fine = await run({ name: 'get_workspace_spec', args: { columns: 288 } });
         expect(fine.spec.panels[1]).toMatchObject({ x: 72, w: 144 });
         expect(fine.panelTypes.chart.min_w).toBe(72);
+    });
+
+    it('a consumer selects the fork schema returned by get_workspace_spec for a research panel', async () => {
+        const { run, setWorkspace } = fixture();
+        setWorkspace({
+            blocks: [{ id: 'neo', type: 'neo-research', pin: '2330' }],
+            layout: [{ i: 'neo', x: 0, y: 0, w: 96, h: 16, minW: 48, minH: 10 }],
+        });
+        const result = await run({ name: 'get_workspace_spec', args: {} });
+        const consumer = new Ajv2020({ allErrors: true });
+        consumer.addSchema(upstreamSchema).addSchema(forkSchema);
+        expect(result.schema).toBe(forkSchema.$id);
+        expect(result.schema).not.toBe(upstreamSchema.$id);
+        expect(consumer.getSchema(result.schema)!(result.spec)).toBe(true);
+        expect(consumer.getSchema(upstreamSchema.$id)!(result.spec)).toBe(false);
     });
 
     it('validate reports errors without a token, and a diff + token when valid', async () => {

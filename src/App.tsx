@@ -17,6 +17,7 @@ import { ChainMap } from './components/chain-map';
 import { PortfolioSectorPanel } from './components/portfolio-sector-panel';
 import { ChipsCard } from './components/chips-card';
 import { CompanyPanel } from './components/company-panel';
+import { NeoContractResearchPanel } from './features/neo-research/NeoContractResearchPanel';
 import { ComboListPanel } from './components/combo-list';
 import { ComboTicket } from './components/combo-ticket';
 import { CommandPalette } from './components/command-palette';
@@ -435,6 +436,8 @@ function BlockBody({
             ) : (
                 <BlockPlaceholder phase={missingContractPhase} />
             );
+        case 'neo-research':
+            return <NeoContractResearchPanel contract={contract} />;
         case 'company':
             return contract ? (
                 <CompanyPanel

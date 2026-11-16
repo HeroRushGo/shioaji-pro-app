@@ -58,6 +58,7 @@ export type BlockType =
     | 'pnl'
     | 'chips'
     | 'company'
+    | 'neo-research'
     | 'volprofile'
     | 'optchain'
     | 'stockfutures'
@@ -450,6 +451,14 @@ export const BLOCK_META: Record<
         pinnable: true,
         singleton: false,
         defaultSize: { w: 6, h: 14, minW: 4, minH: 7 },
+    },
+    'neo-research': {
+        label: 'Neo 研究',
+        description: '獨立研究面板原型；公司財務與 VWAP／POC 合成示範資料',
+        category: 'tools',
+        pinnable: true,
+        singleton: false,
+        defaultSize: { w: 8, h: 16, minW: 4, minH: 10 },
     },
     volprofile: {
         label: '分價量表',
