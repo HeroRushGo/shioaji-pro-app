@@ -85,6 +85,12 @@ const candles = (
     });
 
 export const PANEL_PREVIEWS: Record<BlockType, ReactNode> = {
+    'neo-research': <Frame>
+        <Ln x={8} y={12} w={52} color={accent} />
+        <Ln x={8} y={28} w={24} /><Ln x={70} y={28} w={32} color={accent} />
+        <Ln x={8} y={43} w={24} /><Ln x={70} y={43} w={25} />
+        <Ln x={8} y={58} w={60} />
+    </Frame>,
     watchlist: <Frame>{rowList([up, down, up, up, down])}</Frame>,
     movers: (
         <Frame>

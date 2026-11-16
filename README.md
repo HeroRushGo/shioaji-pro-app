@@ -1,5 +1,7 @@
 # Shioaji Pro — 專業交易終端 Trading Terminal
 
+> **Community fork：Neo 研究工作台** — `pnpm dev:research` 啟動獨立研究入口（127.0.0.1:5174）；本階段使用合成示範資料。操作、資料界線與驗證見 [本機研究工作台指南](docs/NEO-RESEARCH.md)。以下為上游產品說明。
+
 **[官方網站 / Landing Page](https://sinotrade.github.io/shioaji-pro-app/)** ・
 **[下載 Download](https://github.com/Sinotrade/shioaji-pro-app/releases/latest)**
 

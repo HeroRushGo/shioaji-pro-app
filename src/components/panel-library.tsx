@@ -86,6 +86,7 @@ const PANEL_ICONS: Record<BlockType, LucideIcon> = {
     pnl: PieChart,
     chips: Users,
     company: Building2,
+    'neo-research': FlaskConical,
     volprofile: BarChart2,
     optchain: Table,
     stockfutures: Package,

@@ -6,6 +6,9 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
+        "dev:research": "vite --config vite.research.config.ts --open /research.html",
+        "build:research": "tsc -b && vite build --config vite.research.config.ts",
+        "preview:research": "vite preview --config vite.research.config.ts --open /research.html",
         "desktop:dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
         "desktop:qa": "tauri build --debug --config src-tauri/tauri.dev.conf.json",
         "build": "tsc -b && vite build",
