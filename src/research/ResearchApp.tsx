@@ -97,7 +97,7 @@ export function ResearchApp() {
                         onClick={() => { setWorkspace(defaultWorkspace()); setDraft('2330'); setMessage(''); }}><RotateCcw size={14} />重設</button>
                 </div>
                 <div className='research-workspace-info'><span>拖拉標題列調整位置，拖拉右下角調整大小</span>
-                    <span role='status'>{saved ? '版面已儲存於本機' : '儲存不可用，重載將回到預設版面'} · {workspace.panels.length}/{MAX_PANELS}</span></div>
+                    <span role='status'>{saved ? '版面已儲存於本機' : '本次版面變更未儲存'} · {workspace.panels.length}/{MAX_PANELS}</span></div>
                 <div className='research-grid' ref={containerRef}>
                     {workspace.panels.length === 0 && <div className='research-empty'><BookOpen size={28} />
                         <h2>建立你的研究版面</h2><p>加入研究面板，比較不同商品與同一時間的資料。</p>
