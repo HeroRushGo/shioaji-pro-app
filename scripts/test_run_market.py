@@ -15,6 +15,33 @@ spec.loader.exec_module(market)
 
 
 class MarketLauncherTests(unittest.TestCase):
+    def test_interrupt_between_spawn_and_registration_tracks_then_reaps_child(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryFile() as log:
+            owned = market.OwnedProcesses(log)
+            original_spawn = subprocess.Popen
+            created = []
+            unrelated = original_spawn([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)
+            def spawn_then_interrupt(*args, **kwargs):
+                child = original_spawn(*args, **kwargs)
+                created.append(child)
+                # Inject the real signal in exactly the Popen-return window.
+                signal.raise_signal(signal.SIGINT)
+                signal.raise_signal(signal.SIGTERM)
+                return child
+            previous = {sig: signal.signal(sig, owned.interrupted) for sig in (signal.SIGINT, signal.SIGTERM)}
+            try:
+                with patch.object(market.subprocess, 'Popen', side_effect=spawn_then_interrupt):
+                    with self.assertRaises(KeyboardInterrupt):
+                        owned.start([sys.executable, '-c', 'import time; time.sleep(60)'], {}, folder)
+                self.assertEqual(owned.children, created)
+                self.assertEqual(len(owned.children), 1)
+                market.stop_children(owned.children, grace=.2)
+                self.assertIsNotNone(created[0].returncode)
+                self.assertIsNone(unrelated.poll())
+            finally:
+                for sig, handler in previous.items(): signal.signal(sig, handler)
+                market.stop_children([*created, unrelated], grace=0)
+
     def test_macos_eperm_for_zombie_group_is_not_a_live_permission_failure(self):
         leader = Mock(pid=43210)
         with patch.object(market.os, 'killpg', side_effect=PermissionError()), patch.object(market.subprocess, 'check_output', return_value='43210 Z\n'):

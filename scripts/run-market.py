@@ -18,6 +18,37 @@ BINARY_SHA256 = "52907491366170a430991e3b6701a21718263a04b48b71649de0e4961bcb5b9
 PORTS = (21324, 21323, 5173)
 
 
+class OwnedProcesses:
+    """Defer shutdown only across spawn-to-registration, without blocking
+    OS signals (a blocked mask would otherwise be inherited by the child)."""
+    def __init__(self, log):
+        self.log = log
+        self.children = []
+        self.spawning = False
+        self.shutdown_started = False
+
+    def interrupted(self, _signum, _frame):
+        if self.shutdown_started:
+            return
+        self.shutdown_started = True
+        if not self.spawning:
+            raise KeyboardInterrupt
+
+    def start(self, argv, child_env, cwd):
+        self.spawning = True
+        try:
+            if self.shutdown_started:
+                raise KeyboardInterrupt
+            child = subprocess.Popen(argv, env=child_env, cwd=cwd, stdin=subprocess.DEVNULL,
+                                     stdout=self.log, stderr=self.log, start_new_session=True)
+            self.children.append(child)
+        finally:
+            self.spawning = False
+        if self.shutdown_started:
+            raise KeyboardInterrupt
+        return child
+
+
 def clean_environment(source):
     return {key: source[key] for key in ("HOME", "PATH", "LANG", "TMPDIR", "TRADING_LOG_ROOT") if key in source}
 
@@ -164,21 +195,11 @@ def run(vault):
         raise RuntimeError("log symlink refused")
     log = log_path.open("a")
     os.chmod(log_path, 0o600)
-    children = []
-    shutdown_started = False
-    def interrupted(_signum, _frame):
-        nonlocal shutdown_started
-        if shutdown_started:
-            return
-        shutdown_started = True
-        raise KeyboardInterrupt
-    signal.signal(signal.SIGTERM, interrupted)
-    signal.signal(signal.SIGINT, interrupted)
-    def start(argv, child_env, cwd):
-        child = subprocess.Popen(argv, env=child_env, cwd=cwd, stdin=subprocess.DEVNULL,
-                                 stdout=log, stderr=log, start_new_session=True)
-        children.append(child)
-        return child
+    owned = OwnedProcesses(log)
+    children = owned.children
+    signal.signal(signal.SIGTERM, owned.interrupted)
+    signal.signal(signal.SIGINT, owned.interrupted)
+    start = owned.start
     try:
         start([str(binary), "server", "start", "--production", "--auth", "--no-open"], backend_env, root)
         wait_backend(children, f"Bearer {api_key}:{secret_key}")
@@ -195,7 +216,7 @@ def run(vault):
             time.sleep(1)
         raise RuntimeError("owned child exited; stack rolled back")
     finally:
-        shutdown_started = True
+        owned.shutdown_started = True
         cleanup_runtime(children, session_home, log, lock)
 
 
