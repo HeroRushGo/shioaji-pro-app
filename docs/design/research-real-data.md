@@ -35,6 +35,8 @@ ResearchQuery 保留 symbol/date/cutoff，新增 `sourceMode: real|fixture`、`f
 
 ResearchSnapshot 保留頂層 revenue/quarters/replay 陣列，另有 `finance`、`replayInfo` 獨立 metadata（status/source/releaseId/firstSeenAt/notice/provenance）。錯 hash/schema/query/未來點須拒收，兩資料區塊可部分成功；真值缺資料永不 fallback fixture。瀏覽器請求有 AbortSignal，query key 含來源與財務模式；晚回應不得串股、跨日期或來源。
 
+同一次查詢並行讀取兩資料集時，初始目錄與各分支後續讀到的撤回 ID／資料族封鎖取單調聯集；兩分支都完成後，再統一套用至整份結果。任一分支已觀測的撤回不能被另一分支的舊目錄覆蓋；受影響的數值、provenance、實際最後時點一律清空並標 revoked，另一合格區塊仍可顯示。以財務先完成／重播先完成及 ID／family 撤回的確定性交錯測試驗證；不宣稱能偵測最後一次同步之後才發生的撤回。
+
 ## 驗收與回退
 
 - 真實來源 bytes SHA 對 manifest；上市/上櫃/金融股/缺股，至少一個月營收與一季科目對官方原表核數與單位。

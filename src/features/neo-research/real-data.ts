@@ -158,6 +158,15 @@ export async function loadRealResearchSnapshot(query: ResearchQuery, signal?: Ab
         result.replayInfo = info('unavailable', 'neo-replay', notice);
         return result;
     }
+    // Withdrawals observed by either parallel branch apply to this whole
+    // query. A later stale catalog may add information, never remove it.
+    const revokedIds = new Set<string>();
+    const blockedKinds = new Set<'finance' | 'replay'>();
+    const observeWithdrawals = (value: ResearchCatalog) => {
+        for (const id of value.revoked) revokedIds.add(id);
+        for (const kind of value.blockedKinds ?? []) blockedKinds.add(kind);
+    };
+    observeWithdrawals(catalog);
     const selections = { finance: selectRelease(catalog, 'finance', requested), replay: selectRelease(catalog, 'replay', requested) };
     const identity = selections.finance.release?.items.find(item => item.symbol === requested.symbol)
         ?? selections.replay.release?.items.find(item => item.symbol === requested.symbol && item.date === requested.date);
@@ -176,7 +185,8 @@ export async function loadRealResearchSnapshot(query: ResearchQuery, signal?: Ab
             const payload = parsePayload(await readJson(item.path, signal, item.sha256), kind, release, item);
             // Re-read withdrawals after payload validation; a pointer switch must not revive a withdrawn pinned version.
             const current = await loadResearchCatalog(signal);
-            if (current.revoked.includes(release.id) || current.blockedKinds?.includes(kind)) { result[key] = info('revoked', kind, '資料在載入期間撤回，已拒絕顯示。', release); return; }
+            observeWithdrawals(current);
+            if (revokedIds.has(release.id) || blockedKinds.has(kind)) { result[key] = info('revoked', kind, '資料在載入期間撤回，已拒絕顯示。', release); return; }
             result[key] = { ...selection.metadata, provenance: payload.provenance as Row,
                 notice: kind === 'finance' ? requested.financeMode === 'as_of' ? '依本機當時已留存版本顯示。' : '最新可用財務；不是重播當時已知資料。' : 'neo 原始前綴輸出，瀏覽器不重算 VWAP／POC。' };
             if (kind === 'finance') {
@@ -195,6 +205,19 @@ export async function loadRealResearchSnapshot(query: ResearchQuery, signal?: Ab
         }
     }));
     abort(signal);
+    // The other branch may have observed this dataset's withdrawal after it
+    // finished. Clear both the values and derived display metadata before any
+    // result escapes to the caller; keep the independent valid dataset intact.
+    for (const kind of ['finance', 'replay'] as const) {
+        const release = selections[kind].release;
+        if (!blockedKinds.has(kind) && (!release || !revokedIds.has(release.id))) continue;
+        const key = kind === 'finance' ? 'finance' : 'replayInfo';
+        result[key] = info('revoked', kind, '此查詢已觀測到資料撤回，已拒絕顯示。', release);
+        if (kind === 'finance') {
+            result.revenue = [];
+            result.quarters = [];
+        } else result.replay = [];
+    }
     result.status = result.finance.status === 'ready' || result.replayInfo.status === 'ready' ? 'ready' : 'missing';
     result.releaseId = [result.finance.releaseId, result.replayInfo.releaseId].filter(Boolean).join(' / ');
     return result;

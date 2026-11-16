@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createHash, webcrypto } from 'node:crypto';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { loadRealResearchSnapshot, parseResearchCatalog, type ResearchCatalog } from './real-data';
-import type { ResearchQuery } from './model';
+import type { ResearchQuery, ResearchSnapshot } from './model';
 
 const observed = '2026-11-16T02:00:00.000Z';
 const query: ResearchQuery = { symbol: '2330', date: '2026-11-13', cutoff: '10:00', sourceMode: 'real', financeMode: 'latest' };
@@ -52,7 +53,100 @@ function setup() {
 }
 afterEach(() => vi.unstubAllGlobals());
 
+type DataKind = 'finance' | 'replay';
+type Withdrawal = 'id' | 'family';
+const interleavings = (['finance', 'replay'] as const).flatMap(finishedFirst =>
+    (['id', 'family'] as const).map(withdrawal => ({ finishedFirst, withdrawal })));
+
+function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>(yes => { resolve = yes; });
+    return { promise, resolve };
+}
+
+/**
+ * Hold one payload until the other branch has finished its post-validation
+ * catalog read. All its remaining work is in-memory Response/JSON microtasks;
+ * one event-loop barrier drains those before releasing the held payload.
+ * No wall-clock delays or repeated polling determine the interleaving.
+ */
+async function loadAcrossWithdrawal(finishedFirst: DataKind, withdrawal: Withdrawal, staleLastCatalog = false) {
+    const data = setup();
+    const waitingKind: DataKind = finishedFirst === 'finance' ? 'replay' : 'finance';
+    const withdrawnKind = staleLastCatalog ? waitingKind : finishedFirst;
+    const clean = structuredClone(data.catalog);
+    const withdrawn = structuredClone(clean);
+    if (withdrawal === 'id') withdrawn.revoked = [clean[`${withdrawnKind}Releases`][0]!.id];
+    else withdrawn.blockedKinds = [withdrawnKind];
+    const catalogs = staleLastCatalog ? [clean, withdrawn, clean] : [clean, clean, withdrawn];
+    const releaseWaitingPayload = deferred();
+    const waitingPayloadRequested = deferred();
+    const firstRecheckRequested = deferred();
+    const catalogBodies: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, options?: RequestInit) => {
+        data.calls.push({ url, options });
+        if (url === '/research-data/catalog.json') {
+            const catalog = catalogs[catalogBodies.length];
+            if (!catalog) throw new Error('Unexpected extra catalog read');
+            const body = JSON.stringify(catalog);
+            catalogBodies.push(body);
+            if (catalogBodies.length === 2) firstRecheckRequested.resolve();
+            return new Response(body, { headers: { 'Content-Type': 'application/json' } });
+        }
+        const waitingPath = `/research-data/${clean[`${waitingKind}Releases`][0]!.items[0]!.path}`;
+        if (url === waitingPath) {
+            waitingPayloadRequested.resolve();
+            await releaseWaitingPayload.promise;
+        }
+        const body = data.files.get(url);
+        return new Response(body ?? '{}', { status: body ? 200 : 404,
+            headers: { 'Content-Type': 'application/json' } });
+    }));
+    const pending = loadRealResearchSnapshot(query);
+    await Promise.all([waitingPayloadRequested.promise, firstRecheckRequested.promise]);
+    await nextTurn();
+    releaseWaitingPayload.resolve();
+    const result = await pending;
+    expect(catalogBodies).toHaveLength(3);
+    expect(data.calls).toHaveLength(5); // One initial catalog, two payloads, two bounded rechecks.
+    expect(data.calls.every(call => call.url.startsWith('/research-data/')
+        && call.options?.cache === 'no-store' && call.options.credentials === 'omit'
+        && call.options.redirect === 'error')).toBe(true);
+    return { result, withdrawnKind, catalogBodies };
+}
+
+function expectWithdrawnDatasetCleared(result: ResearchSnapshot, kind: DataKind) {
+    const key = kind === 'finance' ? 'finance' : 'replayInfo';
+    const otherKey = kind === 'finance' ? 'replayInfo' : 'finance';
+    expect(result[key].status).toBe('revoked');
+    expect(result[key].notice).toContain('撤回');
+    expect(result[key].provenance).toBeUndefined();
+    expect(result[key].actualAsOf).toBeUndefined();
+    expect(result[key].samplingMinutes).toBeUndefined();
+    expect(result[otherKey].status).toBe('ready');
+    expect(result.status).toBe('ready'); // The other independently valid dataset survives.
+    if (kind === 'finance') {
+        expect(result.revenue).toEqual([]);
+        expect(result.quarters).toEqual([]);
+        expect(result.replay).toHaveLength(3);
+        expect(result.replayInfo.actualAsOf).toBe('2026-11-13T10:00:00+08:00');
+    } else {
+        expect(result.replay).toEqual([]);
+        expect(result.revenue[0]?.revenueThousands).toBe(586890319);
+        expect(result.quarters[0]?.eps).toBe(29.42);
+    }
+}
+
 describe('verified local research provider', () => {
+    it.each(interleavings)('applies $withdrawal withdrawal from the other recheck after $finishedFirst already finished', async ({ finishedFirst, withdrawal }) => {
+        const { result, withdrawnKind } = await loadAcrossWithdrawal(finishedFirst, withdrawal);
+        expectWithdrawnDatasetCleared(result, withdrawnKind);
+    });
+    it.each(interleavings)('does not forget $withdrawal withdrawal seen by $finishedFirst when the later catalog is older', async ({ finishedFirst, withdrawal }) => {
+        const { result, withdrawnKind, catalogBodies } = await loadAcrossWithdrawal(finishedFirst, withdrawal, true);
+        expect(catalogBodies[2]).toBe(catalogBodies[0]);
+        expectWithdrawnDatasetCleared(result, withdrawnKind);
+    });
     it('keeps latest finance separate from replay time, preserving exact neo values and prefix POC', async () => {
         const { calls } = setup();
         const result = await loadRealResearchSnapshot({ ...query, cutoff: '09:45' });
