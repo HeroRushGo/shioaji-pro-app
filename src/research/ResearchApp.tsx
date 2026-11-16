@@ -5,7 +5,7 @@ import { PanelChrome } from '../components/panel-chrome';
 import * as panelStyles from '../components/panel.css';
 import { NeoResearchPanel } from '../features/neo-research/NeoResearchPanel';
 import { RESEARCH_DATES, RESEARCH_SYMBOLS } from '../features/neo-research/model';
-import { defaultWorkspace, MAX_PANELS, restoreWorkspace, STORAGE_KEY, validSymbol } from './workspace';
+import { defaultWorkspace, DEFAULT_PANEL_SIZE, MAX_PANELS, RESEARCH_GRID_LIMITS, restoreWorkspace, STORAGE_KEY, validSymbol } from './workspace';
 import type { ResearchWorkspace } from './workspace';
 import 'react-grid-layout/css/styles.css';
 import './research.css';
@@ -38,7 +38,11 @@ export function ResearchApp() {
             const bottom = previous.layout.reduce((y, item) => Math.max(y, item.y + item.h), 0);
             return {
                 ...previous, panels: [...previous.panels, { id, type: 'neo-research', pin: null }],
-                layout: [...previous.layout, { i: id, x: 0, y: bottom, w: 6, h: 16, minW: 4, minH: 10 }],
+                layout: [...previous.layout, {
+                    i: id, x: 0,
+                    y: Math.min(bottom, RESEARCH_GRID_LIMITS.maxRows - DEFAULT_PANEL_SIZE.h),
+                    ...DEFAULT_PANEL_SIZE,
+                }],
             };
         });
     }
@@ -99,7 +103,7 @@ export function ResearchApp() {
                         <h2>建立你的研究版面</h2><p>加入研究面板，比較不同商品與同一時間的資料。</p>
                         <button onClick={addPanel}>新增研究面板</button></div>}
                     {mounted && workspace.panels.length > 0 && <GridLayout width={width} layout={workspace.layout}
-                        gridConfig={{ cols: 12, rowHeight: 30, margin: [14, 14], containerPadding: [0, 0] }}
+                        gridConfig={{ ...RESEARCH_GRID_LIMITS, rowHeight: 30, margin: [14, 14], containerPadding: [0, 0] }}
                         dragConfig={{ handle: '.drag-handle', cancel: 'button,input,select,a' }}
                         onLayoutChange={layout => setWorkspace(previous => ({ ...previous, layout: [...layout] }))}>
                         {workspace.panels.map(panel => {

@@ -2,6 +2,14 @@ import type { LayoutItem } from 'react-grid-layout';
 
 export const STORAGE_KEY = 'neo-pro-research-workspace-v1';
 export const MAX_PANELS = 6;
+export const RESEARCH_GRID_LIMITS = { cols: 12, maxRows: 330 } as const;
+export const PANEL_SIZE_LIMITS = {
+    minW: 4,
+    maxW: RESEARCH_GRID_LIMITS.cols,
+    minH: 10,
+    maxH: 30,
+} as const;
+export const DEFAULT_PANEL_SIZE = { w: 6, h: 16, ...PANEL_SIZE_LIMITS } as const;
 export type ResearchPanel = { id: string; type: 'neo-research'; pin: string | null };
 export type ResearchWorkspace = {
     version: 1;
@@ -24,17 +32,18 @@ export function defaultWorkspace(): ResearchWorkspace {
             { id: 'research-2', type: 'neo-research', pin: '2891' },
         ],
         layout: [
-            { i: 'research-1', x: 0, y: 0, w: 6, h: 16, minW: 4, minH: 10 },
-            { i: 'research-2', x: 6, y: 0, w: 6, h: 16, minW: 4, minH: 10 },
+            { i: 'research-1', x: 0, y: 0, ...DEFAULT_PANEL_SIZE },
+            { i: 'research-2', x: 6, y: 0, ...DEFAULT_PANEL_SIZE },
         ],
     };
 }
 
 const record = (value: unknown): value is Record<string, unknown> =>
     !!value && typeof value === 'object' && !Array.isArray(value);
-const integer = (value: unknown, low: number, high: number, fallback: number) =>
-    typeof value === 'number' && Number.isFinite(value)
-        ? Math.min(high, Math.max(low, Math.round(value))) : fallback;
+const integer = (value: unknown, low: number, high: number, fallback: number) => {
+    const number = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+    return Math.min(high, Math.max(low, Math.round(number)));
+};
 
 /** Only the research namespace is accepted. Never deserialize Pro trading panels. */
 export function restoreWorkspace(raw: string | null): ResearchWorkspace {
@@ -56,12 +65,13 @@ export function restoreWorkspace(raw: string | null): ResearchWorkspace {
         const layout = panels.map((panel, index): LayoutItem => {
             const item: unknown = savedLayout.find(item => record(item) && item.i === panel.id);
             const geometry = record(item) ? item : {};
-            const w = integer(geometry.w, 4, 12, 6);
+            const w = integer(geometry.w, PANEL_SIZE_LIMITS.minW, PANEL_SIZE_LIMITS.maxW, DEFAULT_PANEL_SIZE.w);
+            const h = integer(geometry.h, PANEL_SIZE_LIMITS.minH, PANEL_SIZE_LIMITS.maxH, DEFAULT_PANEL_SIZE.h);
             return {
-                i: panel.id, w,
-                x: integer(geometry.x, 0, 12 - w, (index % 2) * 6),
-                y: integer(geometry.y, 0, 300, Math.floor(index / 2) * 16),
-                h: integer(geometry.h, 10, 30, 16), minW: 4, minH: 10,
+                i: panel.id, w, h,
+                x: integer(geometry.x, 0, RESEARCH_GRID_LIMITS.cols - w, (index % 2) * DEFAULT_PANEL_SIZE.w),
+                y: integer(geometry.y, 0, RESEARCH_GRID_LIMITS.maxRows - h, Math.floor(index / 2) * DEFAULT_PANEL_SIZE.h),
+                ...PANEL_SIZE_LIMITS,
             };
         });
         return {

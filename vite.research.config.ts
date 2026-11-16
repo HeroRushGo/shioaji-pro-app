@@ -2,10 +2,10 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
-import { defineConfig, type Plugin } from 'vite';
-import { deniedResearchPath, isResearchSource } from './src/research/boundary';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
+import { assertResearchSources, deniedResearchPath, isResearchSource, researchSourcePath } from './src/research/boundary';
 
-const sourceRoot = path.resolve(__dirname, 'src') + path.sep;
+const sourceRoot = normalizePath(path.resolve(__dirname, 'src'));
 const policy = (dev: boolean) => [
     "default-src 'self'", `script-src 'self'${dev ? " 'unsafe-inline'" : ''}`,
     "style-src 'self' 'unsafe-inline'", "img-src 'self' data:",
@@ -29,16 +29,15 @@ function researchBoundary(): Plugin {
             });
         },
         transform(_code, id) {
-            const source = id.split('?')[0] ?? id;
-            if (source.startsWith(sourceRoot) && !isResearchSource(path.relative(__dirname, source))) {
-                throw new Error(`Research entry cannot import ${path.relative(__dirname, source)}`);
+            const source = researchSourcePath(normalizePath(id), sourceRoot);
+            if (source && !isResearchSource(source)) {
+                throw new Error(`Research entry cannot import ${source}`);
             }
         },
         generateBundle() {
-            const sources = [...this.getModuleIds()].filter(id => id.startsWith(sourceRoot))
-                .map(id => path.relative(__dirname, id).replaceAll('\\', '/'));
-            const forbidden = sources.filter(id => !isResearchSource(id));
-            if (forbidden.length) this.error(`Research bundle imported services: ${forbidden.join(', ')}`);
+            const sources = [...this.getModuleIds()].map(id => researchSourcePath(normalizePath(id), sourceRoot))
+                .filter((id): id is string => id !== null);
+            assertResearchSources(sources);
             this.emitFile({ type: 'asset', fileName: 'research-build.json', source: JSON.stringify({
                 entry: 'research.html', source: 'fixture', brokerConnections: false, reviewedSourceModules: sources.sort(),
             }, null, 2) });
@@ -53,6 +52,7 @@ export default defineConfig(({ command }) => {
         if (execFileSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).trim()) revision += '+dirty';
     } catch { /* Source archives retain an honest unknown build identity. */ }
     return {
+        appType: 'mpa',
         plugins: [researchBoundary(), vanillaExtractPlugin(), react()],
         define: { 'process.env': {}, __SHIOAJI_BUILD_VERSION__: JSON.stringify(revision) },
         build: {

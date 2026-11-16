@@ -13,6 +13,8 @@ pnpm dev:research
 
 開啟 `http://127.0.0.1:5174/research.html`。預設兩個可拖拉、縮放的研究面板，一個跟隨選股，一個鎖定 2891 供比較。點標題列的「連動／鎖定」切換狀態；右上角可新增面板，最多六個。版面儲存在此瀏覽器的 `neo-pro-research-workspace-v1`，儲存被禁止時仍可使用並提示重載不保留。
 
+互動與還原共用大小限制（寬 4–12 欄、高 10–30 列），重載保留各面板的位置與大小。
+
 基線工具鏈為 Node 22.23.5、pnpm 10.34.9；`.nvmrc` 指定 Node。也可不改全域工具鏈而啟動：
 
 ```sh
@@ -32,6 +34,8 @@ npm exec --yes --package=node@22.23.5 --package=pnpm@10.34.9 -- pnpm dev:researc
 ## 資料與網路界線
 
 研究入口不經原版 main／App／bootstrap；沒有券商、帳務、下單、SSE 或外部資料連線。開發伺服器沒有 API proxy，`/api`、`/admin`、`/stream`、`/apps` 與原版 HTML 入口回 403。研究 build 有來源模組 allowlist，誤帶入未審閱的 shared 模組會失敗，並輸出 `dist-research/research-build.json`。這些是本原型的工程界線，不是對任意外掛程式碼的沙箱保證。
+
+未知書籤回 404，不套用原版首頁 fallback。來源路徑檢查先正規化分隔符；建置收據必須包含研究入口與面板，不能以空清單成功。
 
 未來真實資料 adapter 應另行完成版本、期別、單位、first_seen／as_of 與來源權利驗證，再接公開財務快照或 neo 明列欄位的唯讀匯出。瀏覽器不直接開 DuckDB、不重算另一套 VWAP／POC、不代理任意 URL。既有 neo-client／8788 與 /score 管線不屬於本次變更。
 
