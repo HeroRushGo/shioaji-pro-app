@@ -251,6 +251,7 @@ class Controller:
 
     def install(self, controller_source, job_source):
         with self.lock():
+            if self.s.config.is_symlink(): raise ControlError('config symlink refused')
             controller_bytes = controller_source.read_bytes(); job_bytes = job_source.read_bytes()
             config = {'managed': MARKER, 'repo': str(self.s.repo), 'vault': str(self.s.vault), 'node': str(self.s.node),
                       'controllerSha256': digest(controller_bytes), 'jobSha256': digest(job_bytes)}

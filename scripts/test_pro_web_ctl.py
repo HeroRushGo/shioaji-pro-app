@@ -341,6 +341,16 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(outside.read_text(), 'preserve')
         self.assertEqual(self.system.mutations(), [])
 
+    def test_dangling_config_symlink_refused_before_registration_or_cleanup(self):
+        self.s.root.mkdir(parents=True, mode=0o700)
+        target = self.root / 'not-created'
+        self.s.config.symlink_to(target)
+        with self.assertRaises(ctl.ControlError):
+            self.install()
+        self.assertTrue(self.s.config.is_symlink())
+        self.assertFalse(target.exists())
+        self.assertEqual(self.system.mutations(), [])
+
     def test_real_readiness_refuses_an_unrelated_listener_before_http(self):
         config = self.install()
         self.control.start()
