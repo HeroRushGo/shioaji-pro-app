@@ -50,11 +50,15 @@ const invalidContracts: readonly [string, ContractInfo | null | undefined][] = [
     ['TAIFEX exchange', contract({ exchange: 'TAIFEX' })],
     ['missing exchange', contract({ exchange: null })],
     ['unknown stock', contract({ code: '0000' })],
+    ['different target code', contract({ target_code: '2377' })],
     ['OTC stock with TSE exchange', contract({ code: '6488', exchange: 'TSE' })],
     ['combo identity', contract({ combo: { code: '2330', combo_type: 'Spread', legs: [] } })],
 ];
 
 describe('upstream contract to research fixture identity', () => {
+    it.each([null, undefined, '', '2330'])('accepts a target resolving to its own primary code: %s', target_code => {
+        expect(researchSymbolForContract(contract({ target_code }))).toBe('2330');
+    });
     it.each([
         ['2330', 'TSE'], ['2377', 'TSE'], ['2891', 'TSE'], ['6488', 'OTC'],
     ] as const)('accepts TW/STK/%s only on its declared %s market', (code, exchange) => {
@@ -93,6 +97,16 @@ afterEach(() => {
 });
 
 describe('contract-aware research renderer', () => {
+    it('clears numbers for a different target, then mounts the primary fixture again', () => {
+        render(contract({ target_code: null }));
+        update(contract({ target_code: '2377' }));
+        expect(fixtureNodes()).toHaveLength(0);
+        expect(text(view!.root)).not.toContain('123.45');
+        expect(observed.unmounts).toEqual(['2330']);
+        update(contract({ target_code: null }));
+        expect(fixtureNodes()).toHaveLength(1);
+        expect(observed.mounts).toEqual(['2330', '2330']);
+    });
     it('unmounts TSE/2330 immediately for OTC/2330, then mounts a fresh valid fixture when switched back', () => {
         render(contract());
         expect(fixtureNodes()).toHaveLength(1);

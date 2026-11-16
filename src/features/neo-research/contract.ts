@@ -3,7 +3,7 @@ import { RESEARCH_SYMBOLS } from './fixtures';
 
 export type ResearchContractIdentity = Pick<
     ContractInfo,
-    'region' | 'security_type' | 'exchange' | 'code' | 'combo'
+    'region' | 'security_type' | 'exchange' | 'code' | 'target_code' | 'combo'
 >;
 
 /**
@@ -16,6 +16,9 @@ export function researchSymbolForContract(
 ): string | null {
     if (!contract || contract.region !== 'TW' || contract.security_type !== 'STK'
         || contract.combo !== undefined) return null;
+    // Match upstream market identity (target_code || code). A different
+    // underlying must not inherit the primary code's research fixture.
+    if (contract.target_code && contract.target_code !== contract.code) return null;
 
     const company = RESEARCH_SYMBOLS.find(entry => entry.symbol === contract.code);
     if (!company) return null;

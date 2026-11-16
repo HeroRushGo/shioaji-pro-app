@@ -35,6 +35,8 @@ npm exec --yes --package=node@22.23.5 --package=pnpm@10.34.9 -- pnpm dev:researc
 
 原版入口核對完整合約的地區、商品類型、交易所與代號：只接受與 fixture 相符的 `TW/STK/TSE` 或 `TW/STK/OTC` 已知普通股票。跨市場、期貨、同碼不同交易所、缺少身分或組合商品會立即顯示缺資料；獨立研究清單本身則已限定這些商品。
 
+行情身分也包含 `target_code || code`；非空且指向其他代號的 `target_code` 不會借用主代號的 fixture。鎖定欄提交非法四碼代號時會還原實際鎖定值。
+
 ## 資料與網路界線
 
 研究入口不經原版 main／App／bootstrap；沒有券商、帳務、下單、SSE 或外部資料連線。開發伺服器沒有 API proxy，`/api`、`/admin`、`/stream`、`/apps` 與原版 HTML 入口回 403。研究 build 有來源模組 allowlist，誤帶入未審閱的 shared 模組會失敗，並輸出 `dist-research/research-build.json`。這些是本原型的工程界線，不是對任意外掛程式碼的沙箱保證。

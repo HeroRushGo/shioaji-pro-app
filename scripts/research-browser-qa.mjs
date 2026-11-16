@@ -168,6 +168,13 @@ export default async (page) => {
         await first().getByTitle('已鎖定；點擊恢復連動').click();
         await first().getByText('6488 · 2026-11-13', { exact: true }).waitFor();
         checks.push('selection and pin/unpin');
+        const pinnedInput = panels().nth(1).getByTitle('鎖定的商品代碼，Enter 套用');
+        await pinnedInput.fill('ABC');
+        await pinnedInput.press('Enter');
+        await qa.waitForFunction(() => document.querySelectorAll('.research-panel')[1]
+            .querySelector('input[title="鎖定的商品代碼，Enter 套用"]').value === '2891');
+        assert((await panels().nth(1).innerText()).includes('2891 ·'), 'invalid pin changed the query');
+        checks.push('invalid pin draft restores the actual pinned identity');
         await qa.getByLabel('截至時間', { exact: true }).fill('10:00');
         await first().getByRole('button', { name: '重播', exact: true }).click();
         await first().locator('table tbody tr').first().waitFor();

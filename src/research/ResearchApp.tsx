@@ -114,7 +114,7 @@ export function ResearchApp() {
                                     symbolName={RESEARCH_SYMBOLS.find(item => item.symbol === symbol)?.name}
                                     pinnable pin={panel.pin} currentCode={workspace.symbol}
                                     onPinChange={pin => {
-                                        if (pin !== null && !validSymbol(pin)) return;
+                                        if (pin !== null && !validSymbol(pin)) return false;
                                         setWorkspace(previous => ({ ...previous, panels: previous.panels.map(item => item.id === panel.id ? { ...item, pin } : item) }));
                                     }}
                                     onRemove={() => setWorkspace(previous => ({ ...previous,
