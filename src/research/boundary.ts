@@ -1,4 +1,5 @@
 const SHARED_SOURCE = new Set([
+    'research.html',
     'src/theme.css.ts', 'src/components/panel-chrome.tsx',
     'src/components/panel-chrome.css.ts', 'src/components/panel.css.ts',
 ]);
@@ -13,14 +14,20 @@ export function isResearchSource(relativePath: string): boolean {
 }
 
 /** Vite IDs use forward slashes even when the project root is a Windows path. */
-export function researchSourcePath(id: string, sourceRoot: string): string | null {
+export function researchProjectPath(id: string, projectRoot: string): string | null {
+    // Vite-generated virtual modules are not first-party files. Package modules
+    // are installed from the frozen lockfile and have their own dependency boundary.
+    if (id.startsWith('\0') || id.startsWith('virtual:')) return null;
     const normalizedId = id.replaceAll('\\', '/').split('?')[0] ?? '';
-    const normalizedRoot = sourceRoot.replaceAll('\\', '/').replace(/\/$/, '');
+    if (['/@react-refresh', '/@vite/client', '/@vite/env'].includes(normalizedId)) return null;
+    if (normalizedId.split('/').includes('node_modules')) return null;
+    const normalizedRoot = projectRoot.replaceAll('\\', '/').replace(/\/$/, '');
     const windows = /^[a-z]:\//i.test(normalizedRoot);
     const candidate = windows ? normalizedId.toLowerCase() : normalizedId;
     const root = windows ? normalizedRoot.toLowerCase() : normalizedRoot;
-    if (!candidate.startsWith(`${root}/`)) return null;
-    return `src/${normalizedId.slice(normalizedRoot.length + 1)}`;
+    if (candidate.startsWith(`${root}/`)) return normalizedId.slice(normalizedRoot.length + 1);
+    // An unknown external file is not silently reclassified as a package/virtual module.
+    return `outside-project:${normalizedId}`;
 }
 
 export function assertResearchSources(sources: string[]): void {
@@ -35,7 +42,15 @@ export function assertResearchSources(sources: string[]): void {
 export function deniedResearchPath(url: string): boolean {
     try {
         const pathname = decodeURIComponent(new URL(url, 'http://127.0.0.1').pathname);
-        return /^\/(?:api|admin|stream|apps)(?:\/|$)/i.test(pathname)
-            || /^\/(?:index|approval)\.html$/i.test(pathname);
+        return /^\/(?:api|admin|stream|apps|dist|dist-research)(?:\/|$)/i.test(pathname)
+            || (/\.html?$/i.test(pathname) && pathname !== '/research.html');
     } catch { return true; }
+}
+
+/** Document navigations have exactly two entry URLs, regardless of file aliases. */
+export function allowedResearchDocument(url: string): boolean {
+    try {
+        const pathname = decodeURIComponent(new URL(url, 'http://127.0.0.1').pathname);
+        return pathname === '/' || pathname === '/research.html';
+    } catch { return false; }
 }

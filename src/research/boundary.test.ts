@@ -1,12 +1,32 @@
 import { describe, expect, it } from 'vitest';
-import { assertResearchSources, deniedResearchPath, isResearchSource, researchSourcePath } from './boundary';
+import { allowedResearchDocument, assertResearchSources, deniedResearchPath, isResearchSource, researchProjectPath } from './boundary';
 
 describe('research import and HTTP boundary', () => {
     it('normalizes Windows module IDs and project roots before applying the allowlist', () => {
-        expect(researchSourcePath('C:/repo/src/lib/shioaji.ts', 'C:\\repo\\src')).toBe('src/lib/shioaji.ts');
-        expect(isResearchSource(researchSourcePath('c:\\repo\\src\\lib\\boot.ts', 'C:/repo/src')!)).toBe(false);
-        expect(researchSourcePath('C:/repo/src/research/main.tsx?x=1', 'C:\\repo\\src')).toBe('src/research/main.tsx');
-        expect(researchSourcePath('/repo/src-other/main.tsx', '/repo/src')).toBeNull();
+        expect(researchProjectPath('C:/repo/src/lib/shioaji.ts', 'C:\\repo')).toBe('src/lib/shioaji.ts');
+        expect(isResearchSource(researchProjectPath('c:\\repo\\src\\lib\\boot.ts', 'C:/repo')!)).toBe(false);
+        expect(researchProjectPath('C:/repo/src/research/main.tsx?x=1', 'C:\\repo')).toBe('src/research/main.tsx');
+        expect(researchProjectPath('/repo-other/main.tsx', '/repo')).toContain('outside-project:');
+    });
+    it('rejects unreviewed first-party sources anywhere in or outside the project', () => {
+        for (const file of ['/repo/shared/format.ts', '/repo/scripts/local.ts', '/another-project/shared.ts']) {
+            expect(isResearchSource(researchProjectPath(file, '/repo')!)).toBe(false);
+        }
+        expect(researchProjectPath('/repo/node_modules/react/index.js', '/repo')).toBeNull();
+        expect(researchProjectPath('\0vite/modulepreload-polyfill.js', '/repo')).toBeNull();
+        expect(researchProjectPath('/@react-refresh', '/repo')).toBeNull();
+        expect(isResearchSource(researchProjectPath('/@react-refresh/local.ts', '/repo')!)).toBe(false);
+        expect(isResearchSource(researchProjectPath('/repo/research.html', '/repo')!)).toBe(true);
+    });
+    it('does not serve original build documents or document aliases', () => {
+        for (const route of ['/dist', '/dist/', '/dist/index.html', '/dist/approval.html',
+            '/dist-research/research.html', '/docs/index.html', '/%64ist/index.html']) {
+            expect(deniedResearchPath(route)).toBe(true);
+            expect(allowedResearchDocument(route)).toBe(false);
+        }
+        expect(allowedResearchDocument('/old-bookmark')).toBe(false);
+        expect(allowedResearchDocument('/')).toBe(true);
+        expect(allowedResearchDocument('/research.html?popout=ticket')).toBe(true);
     });
     it('fails closed for empty or incomplete build receipts', () => {
         expect(() => assertResearchSources([])).toThrow('missing required source');

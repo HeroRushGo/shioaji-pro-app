@@ -37,12 +37,15 @@ npm exec --yes --package=node@22.23.5 --package=pnpm@10.34.9 -- pnpm dev:researc
 
 未知書籤回 404，不套用原版首頁 fallback。來源路徑檢查先正規化分隔符；建置收據必須包含研究入口與面板，不能以空清單成功。
 
+開發站只提供 `/` 與 `/research.html` 的文件導航，原版 `dist/` 文件／別名也拒絕。來源檢查涵蓋整個專案的第一方檔案（含 `src/` 外），套件依賴與 Vite 虛擬模組另行辨識。
+
 未來真實資料 adapter 應另行完成版本、期別、單位、first_seen／as_of 與來源權利驗證，再接公開財務快照或 neo 明列欄位的唯讀匯出。瀏覽器不直接開 DuckDB、不重算另一套 VWAP／POC、不代理任意 URL。既有 neo-client／8788 與 /score 管線不屬於本次變更。
 
 ## 驗證
 
 ```sh
 pnpm test
+pnpm test:research-boundary
 pnpm build
 pnpm build:research
 pnpm preview:research
@@ -53,6 +56,8 @@ pnpm preview:research
 驗收內容：查詢格式／缺資料／截止前綴／取消、研究版面 allowlist／尺寸上限／還原；瀏覽器驗選股、鎖定、切日與游標、增刪面板、拖拉縮放、重載，及券商／admin 路由拒絕與網路嘗試。原版測試與建置仍須通過。
 
 `scripts/research-browser-qa.mjs` 匯出接受 Playwright `page` 的測試函式；由既有 Playwright 環境呼叫 `await run(page)`，自行建立／關閉隔離 context，不改使用者正在看的研究頁。須先起 5174 開發頁，瀏覽器測試不屬於一般 Vitest 套件，無新增 Playwright 依賴。
+
+瀏覽器驗收同時核對儲存值與實際 DOM 位置／尺寸，並跨導覽累積網路及交易快捷鍵事件。`test:research-boundary` 暫建無副作用的專案本地模組、注入研究入口，要求真實 Vite build 拒絕此未審閱的 `src/` 外 import；完成後清掉自己的 probe，不改應用程式來源。
 
 ## Git 與維護
 

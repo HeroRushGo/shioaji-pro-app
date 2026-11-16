@@ -4,9 +4,10 @@ export default async (page) => {
     const upstreamKeys = ['sj-pro-workspace-v3', 'sj-pro-workspace-v2'];
     const context = await page.context().browser().newContext({ viewport: { width: 1440, height: 1100 } });
     const qa = await context.newPage();
-    const errors = [], checks = [], calls = [];
+    const errors = [], checks = [], calls = [], ticketActions = [], dialogs = [], renderedGeometryChecks = [];
     let requestCount = 0;
     qa.on('pageerror', error => errors.push(String(error)));
+    qa.on('dialog', dialog => { dialogs.push(dialog.type()); void dialog.dismiss(); });
     context.on('request', () => requestCount++);
 
     // The host retains all observations across every document/navigation.
@@ -16,12 +17,19 @@ export default async (page) => {
         url.hash = '';
         calls.push({ kind: call.kind, url: url.href, protocols: call.protocols ?? [] });
     });
+    await context.exposeBinding('__recordResearchTicketAction', (_source, event) => {
+        ticketActions.push({ type: event.type });
+    });
     await context.addInitScript(() => {
         const pending = [], reportErrors = [];
         const record = (kind, url, protocols = []) => {
             pending.push(window.__recordResearchCall({ kind, url: String(url), protocols })
                 .catch(error => reportErrors.push(String(error))));
         };
+        window.addEventListener('sj-ticket-action', event => {
+            pending.push(window.__recordResearchTicketAction({ type: event.type })
+                .catch(error => reportErrors.push(String(error))));
+        });
         // Flush before leaving each document as well as after the final restore.
         window.__flushResearchCalls = async () => {
             await Promise.all(pending);
@@ -87,6 +95,42 @@ export default async (page) => {
         }, { key: storageKey, expected });
         assert(JSON.stringify(await stableGeometry()) === JSON.stringify(expected), label);
     };
+    const stableRenderedGeometry = () => qa.evaluate(async () => {
+        const measure = () => {
+            const grid = document.querySelector('.research-grid').getBoundingClientRect();
+            return [...document.querySelectorAll('.research-panel')].map(panel => {
+                const rect = panel.getBoundingClientRect();
+                return { id: panel.dataset.panelId, x: rect.left - grid.left,
+                    y: rect.top - grid.top, width: rect.width, height: rect.height };
+            }).sort((a, b) => a.id.localeCompare(b.id));
+        };
+        let previous = null, stableFrames = 0;
+        for (let frame = 0; frame < 120; frame++) {
+            await new Promise(resolve => requestAnimationFrame(resolve));
+            const current = measure();
+            const stable = previous && current.length === previous.length
+                && current.every((item, index) => item.id === previous[index].id
+                    && ['x', 'y', 'width', 'height'].every(field =>
+                        Math.abs(item[field] - previous[index][field]) <= 0.01));
+            stableFrames = stable ? stableFrames + 1 : 0;
+            previous = current;
+            if (stableFrames >= 3) return current;
+        }
+        throw new Error('Rendered research geometry did not settle');
+    });
+    const assertRenderedGeometry = async (expected, label) => {
+        const actual = await stableRenderedGeometry();
+        assert(actual.length === expected.length, `${label}: panel count`);
+        for (const panel of expected) {
+            const rendered = actual.find(item => item.id === panel.id);
+            assert(rendered, `${label}: missing ${panel.id}`);
+            for (const field of ['x', 'y', 'width', 'height']) {
+                assert(Number.isFinite(rendered[field]) && Math.abs(rendered[field] - panel[field]) <= 1,
+                    `${label}: ${panel.id} ${field}: ${rendered[field]} vs ${panel[field]}`);
+            }
+        }
+        renderedGeometryChecks.push({ label, before: expected, after: actual, tolerancePx: 1 });
+    };
     const isViteHmr = call => {
         if (call.kind !== 'WebSocket') return false;
         const url = new URL(call.url, origin);
@@ -149,33 +193,65 @@ export default async (page) => {
             return item && (item.w !== before.w || item.h !== before.h);
         }, { key: storageKey, id: panelId, before: beforeResize });
         const resizedGeometry = await stableGeometry();
+        const resizedRenderedGeometry = await stableRenderedGeometry();
         await reload();
         await first().getByText('6488 · 2026-11-12', { exact: true }).waitFor();
         await assertGeometry(resizedGeometry, 'drag/resize geometry changed on reload');
-        checks.push('drag/resize/reload preserves every panel x/y/w/h');
+        await assertRenderedGeometry(resizedRenderedGeometry, 'drag/resize DOM geometry changed on reload');
+        checks.push('drag/resize/reload preserves stored and rendered panel geometry');
         await qa.getByRole('button', { name: '新增研究面板', exact: true }).click();
         await qa.waitForFunction(() => document.querySelectorAll('.research-panel').length === 3);
         await panels().last().getByTitle('移除此面板').click();
         await qa.waitForFunction(() => document.querySelectorAll('.research-panel').length === 2);
         const afterRemove = await stableGeometry();
+        const afterRemoveRendered = await stableRenderedGeometry();
         await reload();
         await first().getByText('6488 · 2026-11-12', { exact: true }).waitFor();
         assert(await qa.getByLabel('截至時間', { exact: true }).inputValue() === '10:00', 'restore cursor');
         await assertGeometry(afterRemove, 'add/remove geometry changed on reload');
-        checks.push('add/remove/reload');
+        await assertRenderedGeometry(afterRemoveRendered, 'add/remove DOM geometry changed on reload');
+        checks.push('add/remove/reload preserves stored and rendered panel geometry');
         await qa.getByLabel('其他代號', { exact: true }).fill('0000');
         await qa.getByRole('button', { name: '查詢', exact: true }).click();
         await first().getByText('此查詢沒有示範資料').waitFor();
         checks.push('missing data');
-        for (const key of ['b', 's', 'Escape', 'Escape']) await qa.keyboard.press(key);
+        await qa.evaluate(() => {
+            if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+            document.body.tabIndex = -1;
+            document.body.focus({ preventScroll: true });
+        });
+        assert(await qa.evaluate(() => document.activeElement === document.body), 'hotkey focus is not on body');
+        for (const key of ['b', 's', 'Escape', 'Escape']) {
+            await qa.keyboard.press(key);
+            await qa.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+            assert(await qa.locator('[role="dialog"]:visible,[role="alertdialog"]:visible,dialog[open]:visible').count() === 0,
+                `unexpected confirmation dialog after ${key}`);
+            assert(await qa.getByText(/再按一次\s*Esc\s*全部刪單|撤銷所有未成交委託|全部刪單|取消所有委託/).count() === 0,
+                `unexpected cancellation hint after ${key}`);
+        }
+        checks.push('body-focused B/S/Esc twice show no cancellation hint or confirmation dialog');
 
         const blocked = {};
-        for (const route of ['/api/accounts', '/api/orders', '/admin', '/stream', '/index.html', '/approval.html']) {
+        for (const route of ['/api/accounts', '/api/orders', '/admin', '/stream']) {
             const response = await context.request.get(origin + route);
             blocked[route] = response.status();
             assert(response.status() === 403, `route ${route}`);
         }
         checks.push('forbidden routes rejected');
+        for (const route of ['/index.html', '/approval.html', '/dist/index.html', '/dist/approval.html',
+            '/dist/', '/dist', '/dist-research/research.html']) {
+            const response = await context.request.get(origin + route);
+            blocked[route] = response.status();
+            assert([403, 404].includes(response.status()), `non-research document ${route}`);
+        }
+        checks.push('coexisting original/research build documents and aliases denied');
+        const entryStatuses = {};
+        for (const route of ['/', '/research.html']) {
+            const response = await context.request.get(origin + route);
+            entryStatuses[route] = response.status();
+            assert(response.status() === 200, `research entry unavailable: ${route}`);
+        }
+        checks.push('root and research.html entries remain available');
         const unknownBookmark = await context.request.get(`${origin}/missing-research-bookmark`);
         const unknownBody = await unknownBookmark.text();
         assert(unknownBookmark.status() === 404, 'unknown bookmark must return 404');
@@ -243,11 +319,15 @@ export default async (page) => {
         // No navigation/interaction follows this last cumulative assertion.
         await qa.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await flushCalls();
+        assert(ticketActions.length === 0, `unexpected trading shortcut events: ${JSON.stringify(ticketActions)}`);
+        assert(dialogs.length === 0, `unexpected native dialogs: ${JSON.stringify(dialogs)}`);
+        checks.push('all navigations: zero sj-ticket-action events and native dialogs');
         const unexpected = calls.filter(call => !isViteHmr(call));
         assert(unexpected.length === 0, `unexpected network attempts: ${JSON.stringify(unexpected)}`);
         checks.push('all navigations: zero fetch/XHR/SSE/broker sockets; only identified Vite HMR allowed');
         assert(errors.length === 0, errors.join('; '));
-        return { checks, blocked, calls, pageErrors: errors, requests: requestCount,
+        return { checks, blocked, entryStatuses, calls, ticketActions, dialogs, renderedGeometryChecks,
+            pageErrors: errors, requests: requestCount,
             viewport: { width: 1440, height: 1100 } };
     } finally {
         await context.close();

@@ -3,9 +3,9 @@ import path from 'node:path';
 import react from '@vitejs/plugin-react';
 import { vanillaExtractPlugin } from '@vanilla-extract/vite-plugin';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
-import { assertResearchSources, deniedResearchPath, isResearchSource, researchSourcePath } from './src/research/boundary';
+import { allowedResearchDocument, assertResearchSources, deniedResearchPath, isResearchSource, researchProjectPath } from './src/research/boundary';
 
-const sourceRoot = normalizePath(path.resolve(__dirname, 'src'));
+const projectRoot = normalizePath(path.resolve(__dirname));
 const policy = (dev: boolean) => [
     "default-src 'self'", `script-src 'self'${dev ? " 'unsafe-inline'" : ''}`,
     "style-src 'self' 'unsafe-inline'", "img-src 'self' data:",
@@ -18,10 +18,15 @@ function researchBoundary(): Plugin {
         name: 'research-source-boundary', enforce: 'pre',
         configureServer(server) {
             server.middlewares.use((request, response, next) => {
-                if (deniedResearchPath(request.url ?? '/')) {
-                    response.statusCode = 403;
+                const url = request.url ?? '/';
+                const destination = request.headers['sec-fetch-dest'];
+                const navigation = destination === 'document' || destination === 'iframe'
+                    || request.headers.accept?.includes('text/html');
+                const denied = deniedResearchPath(url);
+                if (denied || (navigation && !allowedResearchDocument(url))) {
+                    response.statusCode = denied ? 403 : 404;
                     response.setHeader('Content-Type', 'application/json');
-                    response.end(JSON.stringify({ error: 'research_only' }));
+                    response.end(JSON.stringify({ error: denied ? 'research_only' : 'research_not_found' }));
                     return;
                 }
                 if (new URL(request.url ?? '/', 'http://localhost').pathname === '/') request.url = '/research.html';
@@ -29,13 +34,13 @@ function researchBoundary(): Plugin {
             });
         },
         transform(_code, id) {
-            const source = researchSourcePath(normalizePath(id), sourceRoot);
+            const source = researchProjectPath(normalizePath(id), projectRoot);
             if (source && !isResearchSource(source)) {
                 throw new Error(`Research entry cannot import ${source}`);
             }
         },
         generateBundle() {
-            const sources = [...this.getModuleIds()].map(id => researchSourcePath(normalizePath(id), sourceRoot))
+            const sources = [...this.getModuleIds()].map(id => researchProjectPath(normalizePath(id), projectRoot))
                 .filter((id): id is string => id !== null);
             assertResearchSources(sources);
             this.emitFile({ type: 'asset', fileName: 'research-build.json', source: JSON.stringify({

@@ -13,6 +13,7 @@
         "desktop:qa": "tauri build --debug --config src-tauri/tauri.dev.conf.json",
         "build": "tsc -b && vite build",
         "test": "vitest run",
+        "test:research-boundary": "node scripts/research-import-boundary-qa.mjs",
         "preview": "vite preview"
     },
     "dependencies": {
