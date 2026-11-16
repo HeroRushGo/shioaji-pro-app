@@ -118,11 +118,12 @@ export async function run(page, { origin = 'http://127.0.0.1:5174' } = {}) {
         assert(response.status() === 200, 'import finance and neo replay before running real-data QA');
         catalog = await response.json();
         assert(catalog.schemaVersion === 1 && Array.isArray(catalog.revoked), 'invalid real-data catalog');
-        const activeFinance = catalog.financeReleases.filter(release => !catalog.revoked.includes(release.id));
+        const newestFirst = (a, b) => Date.parse(b.firstSeenAt) - Date.parse(a.firstSeenAt) || b.id.localeCompare(a.id);
+        const activeFinance = catalog.financeReleases.filter(release => !catalog.revoked.includes(release.id)).sort(newestFirst);
         financeRelease = activeFinance.find(release => release.upstreamCommit === pinnedCommit
             && ['2330', '2377', '6488', '2891'].every(symbol => release.items.some(item => item.symbol === symbol)));
         assert(financeRelease, 'four-stock finance release from independently checked commit is required');
-        replayRelease = catalog.replayReleases.find(release => !catalog.revoked.includes(release.id)
+        replayRelease = [...catalog.replayReleases].sort(newestFirst).find(release => !catalog.revoked.includes(release.id)
             && ['2330', '2377', '6488', '2891'].every(symbol => release.items.some(item => item.symbol === symbol && item.date === '2026-11-13')));
         assert(replayRelease, 'four-stock 2026-11-13 neo replay release is required');
         await qa.goto(`${origin}/research.html?popout=ticket&mockPendingConfirm&condDemo`);
