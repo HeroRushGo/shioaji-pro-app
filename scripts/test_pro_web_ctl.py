@@ -1,5 +1,7 @@
 """Controller acceptance with a fake launchd domain; never touches live jobs."""
 import importlib.util
+from email.message import Message
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location('pro_web_ctl', Path(__file__).with_name('pro_web_ctl.py'))
@@ -33,6 +36,8 @@ class FakeSystem:
         self.hang_stop = False
         self.print_error = None
         self.lsof_error = None
+        self.concurrent_foreign_on_failed_bootstrap = False
+        self.fail_bootouts = 0
 
     def clock(self):
         return self.now
@@ -77,12 +82,18 @@ class FakeSystem:
                 if self.fail_bootstraps:
                     self.fail_bootstraps -= 1
                     code = 5
+                    if self.concurrent_foreign_on_failed_bootstrap:
+                        self.definition = {'ProgramArguments': ['/bin/sleep', '60']}
                 else:
                     self.definition = plistlib.loads(Path(argv[3]).read_bytes())
                     self.pid = None
             elif action == 'bootout':
-                self.definition = None
-                self.pid = None
+                if self.fail_bootouts:
+                    self.fail_bootouts -= 1
+                    code = 5
+                else:
+                    self.definition = None
+                    self.pid = None
             elif action == 'kickstart':
                 if '-k' in argv:
                     raise AssertionError('forced kickstart is forbidden')
@@ -154,13 +165,11 @@ class ControllerTests(unittest.TestCase):
         self.assertGreaterEqual(definition['ExitTimeOut'], 35)
         self.assertFalse(definition['AbandonProcessGroup'])
         args = definition['ProgramArguments']
-        self.assertEqual(args[:2], ['/usr/bin/env', '-i'])
-        self.assertEqual(args[-4:-1], ['/bin/zsh', '-f', str(self.s.root / ('job-' + config['jobSha256'] + '.zsh'))])
+        self.assertEqual(args[:3], ['/bin/zsh', '-f', str(self.s.root / ('job-' + config['jobSha256'] + '.zsh'))])
         self.assertEqual(args[-1], str(self.s.repo))
-        self.assertNotIn('EnvironmentVariables', definition)
-        self.assertIn('ZDOTDIR=' + str(self.s.root / 'no-rc'), args)
+        self.assertEqual(definition['EnvironmentVariables']['ZDOTDIR'], str(self.s.root / 'no-rc'))
         public = {'HOME', 'PATH', 'LANG', 'TRADING_VAULT', 'TRADING_LOG_ROOT', 'ZDOTDIR'}
-        self.assertEqual({arg.split('=')[0] for arg in args[2:-4]}, public)
+        self.assertEqual(set(definition['EnvironmentVariables']), public)
         self.assertNotIn('fixture-secret', self.s.plist.read_text())
         self.assertEqual(self.system.mutations(), ['bootstrap'])
         self.assertIsNone(self.system.pid)
@@ -314,6 +323,42 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(self.system.definition)
         self.assertTrue((self.s.root / 'control.lock').exists())
 
+    def test_failed_bootstrap_cannot_bootout_a_concurrently_appearing_foreign_job(self):
+        self.system.fail_bootstraps = 1
+        self.system.concurrent_foreign_on_failed_bootstrap = True
+        with self.assertRaises(ctl.ControlError):
+            self.install()
+        self.assertEqual(self.system.definition, {'ProgramArguments': ['/bin/sleep', '60']})
+        self.assertNotIn('bootout', self.system.mutations())
+
+    def test_failed_rollback_bootout_retains_artifacts_and_recovery_blocks_install(self):
+        self.install()
+        saved = {path: path.read_bytes() for path in [self.s.config, self.s.command, self.s.plist]}
+        self.source.write_text('# revised controller\n')
+        real_atomic = ctl.atomic
+        failed = False
+        def fail_command_then_bootout(path, data, mode=0o600):
+            nonlocal failed
+            if path == self.s.command and not failed:
+                failed = True
+                self.system.fail_bootouts = 1
+                raise OSError('fixture write failure after successful bootstrap')
+            return real_atomic(path, data, mode)
+        with patch.object(ctl, 'atomic', side_effect=fail_command_then_bootout):
+            with self.assertRaises(ctl.ControlError):
+                self.control.install(self.source, self.job_source)
+        recovery = self.s.root / 'recovery.json'
+        self.assertTrue(recovery.exists())
+        self.assertEqual(recovery.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(plistlib.loads(self.s.plist.read_bytes()), self.system.definition)
+        for path in saved:
+            self.assertTrue(path.exists(), 'retained live definition needs every installation artifact')
+        self.assertEqual(self.s.command.read_bytes(), saved[self.s.command])
+        before = list(self.system.mutations())
+        with self.assertRaises(ctl.ControlError):
+            self.control.install(self.source, self.job_source)
+        self.assertEqual(self.system.mutations(), before)
+
     def test_failed_upgrade_restores_previous_bytes_and_idle_job(self):
         self.install()
         paths = [self.s.config, self.s.command, self.s.plist]
@@ -326,6 +371,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(self.system.definition, plistlib.loads(saved[self.s.plist]))
         self.assertIsNone(self.system.pid)
         self.control.load()
+        self.assertFalse((self.s.root / 'recovery.json').exists())
 
     def test_post_bootstrap_command_write_failure_rolls_back_idle_job(self):
         self.install()
@@ -345,6 +391,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual({path: path.read_bytes() for path in saved}, saved)
         self.assertEqual(self.system.definition, plistlib.loads(saved[self.s.plist]))
         self.assertIsNone(self.system.pid)
+        self.assertFalse((self.s.root / 'recovery.json').exists())
 
     def test_uninstall_preserves_lock_code_logs_and_public_watchlists(self):
         config = self.install()
@@ -412,6 +459,63 @@ class ControllerTests(unittest.TestCase):
             self.assertFalse(self.original_ready(self.control.job()))
         network.assert_not_called()
         self.control.validate_job(config, self.control.job())
+
+    def fake_http_ready(self, overrides=None, html_type='text/html', redirect=False):
+        payloads = {'/api/v1/health': {'status': 'healthy', 'token_stale': False, 'session_recovering': False},
+                    '/api/v1/info': {'version': '1.7.11', 'simulation': False},
+                    '/api/v1/data/contracts/2330?security_type=STK&region=TW': {'code': '2330'}}
+        payloads.update(overrides or {})
+        requests = []
+        handlers = []
+        class Response(io.BytesIO):
+            def __init__(self, payload, content_type):
+                super().__init__(payload)
+                self.headers = Message()
+                self.headers['Content-Type'] = content_type
+        class Opener:
+            def open(self, url, timeout):
+                requests.append(url)
+                if redirect:
+                    handler = next(handler for handler in handlers if isinstance(handler, ctl.urllib.request.HTTPRedirectHandler))
+                    if handler.redirect_request(None, None, 302, 'Found', {}, 'http://untrusted/') is not None:
+                        raise AssertionError('readiness must never follow a redirect')
+                    raise urllib.error.HTTPError(url, 302, 'Found', {}, None)
+                path = url.removeprefix('http://127.0.0.1:5173')
+                if path == '/': return Response(b'<!doctype html><html lang="zh-TW"></html>', html_type)
+                return Response(json.dumps(payloads[path]).encode(), 'application/json')
+        def build(*provided):
+            handlers.extend(provided)
+            return Opener()
+        with patch.object(ctl.urllib.request, 'build_opener', side_effect=build):
+            result = self.original_ready(self.control.job())
+        return result, requests, handlers
+
+    def test_real_readiness_accepts_owned_healthy_production_http_and_html(self):
+        self.install()
+        self.control.start()
+        result, requests, handlers = self.fake_http_ready()
+        self.assertTrue(result)
+        self.assertEqual(len(requests), 4)
+        self.assertEqual(requests[-1], 'http://127.0.0.1:5173/')
+        proxy = next(handler for handler in handlers if isinstance(handler, ctl.urllib.request.ProxyHandler))
+        self.assertEqual(proxy.proxies, {})
+
+    def test_real_readiness_rejects_wrong_version_simulation_or_nonhtml(self):
+        self.install()
+        self.control.start()
+        for overrides, html_type in [({'/api/v1/info': {'version': '0.0.0', 'simulation': False}}, 'text/html'),
+                                     ({'/api/v1/info': {'version': '1.7.11', 'simulation': True}}, 'text/html'),
+                                     ({'/api/v1/health': {'status': 'healthy', 'token_stale': True}}, 'text/html'),
+                                     ({}, 'application/json')]:
+            with self.subTest(overrides=overrides, html_type=html_type):
+                self.assertFalse(self.fake_http_ready(overrides, html_type)[0])
+
+    def test_real_readiness_disables_redirects_without_network(self):
+        self.install()
+        self.control.start()
+        result, requests, _handlers = self.fake_http_ready(redirect=True)
+        self.assertFalse(result)
+        self.assertEqual(len(requests), 1)
 
     def test_parse_job_ignores_nested_domain_pid(self):
         self.install()

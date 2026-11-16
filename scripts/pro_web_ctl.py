@@ -1,5 +1,6 @@
 """On-demand, user-scoped launchd control for the market-only Pro Web stack."""
 import argparse
+import base64
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
@@ -150,13 +151,13 @@ class Controller:
         env = {'HOME': str(self.s.home), 'PATH': f'{self.s.node.parent}:/usr/bin:/bin:/usr/sbin:/sbin',
                'LANG': 'en_US.UTF-8', 'TRADING_VAULT': str(self.s.vault), 'TRADING_LOG_ROOT': str(self.s.logroot),
                'ZDOTDIR': str(self.s.root / 'no-rc')}
-        args = ['/usr/bin/env', '-i', *[f'{key}={value}' for key, value in env.items()], '/bin/zsh', '-f', str(job), str(self.s.repo)]
-        return {'Label': LABEL, 'ProgramArguments': args, 'RunAtLoad': False, 'KeepAlive': False,
+        args = ['/bin/zsh', '-f', str(job), str(self.s.repo)]
+        return {'Label': LABEL, 'ProgramArguments': args, 'EnvironmentVariables': env, 'RunAtLoad': False, 'KeepAlive': False,
                 'WorkingDirectory': str(self.s.logroot), 'Umask': 63, 'ExitTimeOut': 45, 'AbandonProcessGroup': False,
                 'ProcessType': 'Interactive', 'StandardOutPath': str(self.s.log), 'StandardErrorPath': str(self.s.log)}
 
     def validate_job(self, config, job):
-        if job and (job.get('program') != '/usr/bin/env' or job.get('arguments') != self.definition(config)['ProgramArguments']
+        if job and (job.get('program') != '/bin/zsh' or job.get('arguments') != self.definition(config)['ProgramArguments']
                     or job.get('path') != str(self.s.plist)):
             raise ControlError('loaded job is not this managed definition')
 
@@ -257,6 +258,8 @@ class Controller:
     def install(self, controller_source, job_source):
         with self.lock():
             if self.s.config.is_symlink(): raise ControlError('config symlink refused')
+            recovery = self.s.root / 'recovery.json'
+            if recovery.exists() or recovery.is_symlink(): raise ControlError('pending installation recovery; inspect private recovery.json before changing the job')
             controller_bytes = controller_source.read_bytes(); job_bytes = job_source.read_bytes()
             config = {'managed': MARKER, 'repo': str(self.s.repo), 'vault': str(self.s.vault), 'node': str(self.s.node),
                       'controllerSha256': digest(controller_bytes), 'jobSha256': digest(job_bytes)}
@@ -289,22 +292,37 @@ class Controller:
             command = self.command_bytes(config)
             paths = [self.s.config, self.s.command, self.s.plist]
             saved = {p: (p.read_bytes(), p.stat().st_mode & 0o777) if p.exists() else None for p in paths}
-            if old_job and self.lc('bootout', self.s.target).returncode: raise ControlError('cannot unload old idle definition')
+            recovery_data = {'managed': MARKER, 'newConfig': config,
+                             'previous': {str(p): {'bytesBase64': base64.b64encode(v[0]).decode(), 'mode': v[1]} if v else None for p, v in saved.items()}}
+            atomic(recovery, json.dumps(recovery_data, indent=2).encode())
+            if old_job and self.lc('bootout', self.s.target).returncode: raise ControlError('cannot unload old idle definition; recovery snapshot retained')
+            bootstrapped = False
             try:
                 atomic(self.s.plist, plistlib.dumps(self.definition(config)))
                 if self.lc('bootstrap', f'gui/{os.getuid()}', str(self.s.plist)).returncode: raise ControlError('bootstrap failed')
+                bootstrapped = True
                 new_job = self.job(); self.validate_job(config, new_job)
                 if not new_job or new_job.get('pid'): raise ControlError('install must register an idle job')
                 atomic(self.s.config, json.dumps(config, indent=2).encode())
                 atomic(self.s.command, command, 0o700)
             except Exception:
-                self.lc('bootout', self.s.target)
+                try:
+                    remaining = self.job()
+                    if remaining:
+                        if not bootstrapped: raise ControlError('registration is not owned by this attempt')
+                        self.validate_job(config, remaining)
+                        if self.lc('bootout', self.s.target).returncode or self.job() is not None:
+                            raise ControlError('cannot unload new definition')
+                except ControlError:
+                    raise ControlError('install rollback could not safely unload; artifacts and private recovery.json retained') from None
                 for path, previous in saved.items():
                     if previous: atomic(path, *previous)
                     else: path.unlink(missing_ok=True)
                 if old_job and self.lc('bootstrap', f'gui/{os.getuid()}', str(self.s.plist)).returncode:
-                    raise ControlError('install rollback needs attention; previous files restored')
+                    raise ControlError('install rollback needs attention; previous files restored, recovery.json retained')
+                recovery.unlink()
                 raise
+            recovery.unlink()
 
     def uninstall(self):
         with self.lock():
