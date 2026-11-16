@@ -437,7 +437,7 @@ function BlockBody({
                 <BlockPlaceholder phase={missingContractPhase} />
             );
         case 'neo-research':
-            return <NeoContractResearchPanel contract={contract} />;
+            return <NeoContractResearchPanel contract={contract} sourceMode='real' financeMode='latest' />;
         case 'company':
             return contract ? (
                 <CompanyPanel

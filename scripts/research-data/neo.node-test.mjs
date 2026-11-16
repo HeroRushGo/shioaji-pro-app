@@ -227,7 +227,7 @@ function processExists(pid) {
 
 async function supervisedFixture(t, mode) {
     const root = await temporary(t);
-    const names = Object.fromEntries(['pid', 'args', 'term', 'outcome', 'published'].map(name => [name, path.join(root, name)]));
+    const names = Object.fromEntries(['pid', 'ready', 'args', 'term', 'outcome', 'published'].map(name => [name, path.join(root, name)]));
     const fakePython = path.join(root, 'fake-python.mjs');
     // This executable never imports Python, neo-client, or a database. It
     // accepts the production interpreter argv and simulates slow/ignored TERM.
@@ -235,6 +235,7 @@ async function supervisedFixture(t, mode) {
         + `import fs from 'node:fs';\n`
         + `const files = ${JSON.stringify(names)};\n`
         + `fs.writeFileSync(files.pid, String(process.pid));\n`
+        + `if (${JSON.stringify(mode)} === 'SIGTERM') Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);\n`
         + `fs.writeFileSync(files.args, JSON.stringify(process.argv.slice(2)));\n`
         + `process.stdin.resume();\n`
         + `if (${JSON.stringify(mode)} === 'normal') setTimeout(() => console.log(JSON.stringify({ complete: true })), 20);\n`
@@ -245,7 +246,8 @@ async function supervisedFixture(t, mode) {
         + `    console.log(JSON.stringify({ complete: true, afterStop: true }));\n`
         + `    if (${JSON.stringify(mode)} !== 'timeout') setTimeout(() => { clearInterval(keepAlive); process.exitCode = 0; }, 500);\n`
         + `  });\n`
-        + `}\n`, { mode: 0o700 });
+        + `}\n`
+        + `fs.writeFileSync(files.ready, 'signal listeners installed');\n`, { mode: 0o700 });
     const runnerPath = path.join(root, 'runner.mjs');
     await fs.writeFile(runnerPath,
         `import fs from 'node:fs';\n`
@@ -289,6 +291,7 @@ async function supervisedFixture(t, mode) {
         await closed.catch(() => {});
     });
     helperPid = Number(await waitForFile(names.pid));
+    await waitForFile(names.ready);
     assert.ok(Number.isInteger(helperPid) && helperPid > 0);
     return { names, runner, helperPid, closed, stderr: () => stderr };
 }

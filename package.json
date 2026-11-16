@@ -6,6 +6,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
+        "dev:market": "zsh scripts/run-market.zsh",
         "dev:research": "vite --config vite.research.config.ts --open /research.html",
         "build:research": "tsc -b && vite build --config vite.research.config.ts",
         "preview:research": "vite preview --config vite.research.config.ts --open /research.html",

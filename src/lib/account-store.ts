@@ -1,4 +1,5 @@
 import { canTrade } from './account-tradable';
+import { marketOnly } from './market-profile';
 // src/lib/account-store.ts — trading accounts: load (and re-load) the full
 // account list, let the user pick which stock / futures account to trade
 // with; selection feeds every order and portfolio request.
@@ -65,6 +66,7 @@ let inflight: Promise<void> | null = null;
 // trade-report subscription (boot used to issue both back to back)
 let fetching: Promise<Account[]> | null = null;
 function fetchShared(): Promise<Account[]> {
+    if (marketOnly) return Promise.resolve([]);
     if (!fetching) {
         fetching = fetchAccounts().finally(() => {
             fetching = null;

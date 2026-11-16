@@ -24,6 +24,7 @@ import { MarketBar } from './market-bar';
 import { ServerManager } from './server-manager';
 import { WebServerHint } from './server-env-notice';
 import { isTauri } from '../lib/runtime';
+import { marketOnly } from '../lib/market-profile';
 import { ForeignServerChip } from './foreign-server-chip';
 import { externalServerLabel, useServerAttachment } from '../lib/server-adoption';
 import { SettingsDialog } from './settings-dialog';
@@ -276,7 +277,7 @@ export function HudHeader({
                 <span className={styles.logoMark} aria-hidden="true" />
                 <span className={styles.logoMain}>Shioaji Pro</span>
                 <span className={styles.logoSub}>
-                    交易終端
+                    {marketOnly ? '行情唯讀 · 真實行情' : '交易終端'}
                     {appVer && ` · App ${appVer}`}
                 </span>
             </div>
@@ -316,7 +317,7 @@ export function HudHeader({
                 open={serverMgrOpen}
                 onToggle={setServerMgrOpen}
             />
-            <KillSwitchButton />
+            {marketOnly ? <span className={styles.simBadge}>交易停用</span> : <KillSwitchButton />}
             <button
                 className={styles.resetBtn}
                 onClick={onOpenPanelLibrary}
