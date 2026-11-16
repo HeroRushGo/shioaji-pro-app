@@ -116,7 +116,10 @@ class Controller:
 
     def job(self):
         result = self.lc('print', self.s.target)
-        return parse_job(result.stdout) if result.returncode == 0 else None
+        if result.returncode == 0: return parse_job(result.stdout)
+        missing = f'Could not find service "{LABEL}" in domain for user gui: {os.getuid()}'
+        if result.returncode == 113 and missing in result.stderr: return None
+        raise ControlError('cannot inspect launchd job; no absent-job assumption made')
 
     def load(self):
         private(self.s.root, True); private(self.s.config); private(self.s.plist)
@@ -174,6 +177,8 @@ class Controller:
         result = {}
         for port in PORTS:
             output = self.execute(['/usr/sbin/lsof', '-tnP', f'-iTCP:{port}', '-sTCP:LISTEN'])
+            if output.returncode not in (0, 1) or output.stderr.strip():
+                raise ControlError('cannot inspect Pro listener ownership')
             result[port] = sorted({int(value) for value in output.stdout.split() if value.isdigit()})
         return result
 

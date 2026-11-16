@@ -31,6 +31,8 @@ class FakeSystem:
         self.pending_pid = None
         self.last_exit = None
         self.hang_stop = False
+        self.print_error = None
+        self.lsof_error = None
 
     def clock(self):
         return self.now
@@ -60,12 +62,17 @@ class FakeSystem:
     def run(self, argv, **kwargs):
         argv = [str(value) for value in argv]
         self.calls.append((argv, kwargs))
-        code, out = 0, ''
+        code, out, err = 0, '', ''
         if argv[0] == '/bin/launchctl':
             action = argv[1]
             if action == 'print':
-                code = 0 if self.definition else 113
-                out = self.render() if self.definition else ''
+                if self.print_error:
+                    code, err = self.print_error
+                elif self.definition:
+                    out = self.render()
+                else:
+                    code = 113
+                    err = f'Bad request.\nCould not find service "{ctl.LABEL}" in domain for user gui: {os.getuid()}\n'
             elif action == 'bootstrap':
                 if self.fail_bootstraps:
                     self.fail_bootstraps -= 1
@@ -91,9 +98,12 @@ class FakeSystem:
             else:
                 raise AssertionError('unexpected launchctl operation: ' + action)
         elif argv[0] == '/usr/sbin/lsof':
-            port = int(next(arg.split(':')[1] for arg in argv if arg.startswith('-iTCP:')))
-            out = '\n'.join(str(pid) for pid in self.ports[port])
-            code = 0 if out else 1
+            if self.lsof_error:
+                code, err = self.lsof_error
+            else:
+                port = int(next(arg.split(':')[1] for arg in argv if arg.startswith('-iTCP:')))
+                out = '\n'.join(str(pid) for pid in self.ports[port])
+                code = 0 if out else 1
         elif argv[0] == '/bin/ps':
             out = str(self.parents.get(int(argv[-1]), 1))
         elif argv[0] == '/bin/zsh' and argv[-1] == '/usr/bin/true':
@@ -102,7 +112,7 @@ class FakeSystem:
             out = 'v26.13.0\n'
         else:
             raise AssertionError('unexpected subprocess: ' + repr(argv))
-        return subprocess.CompletedProcess(argv, code, out, '')
+        return subprocess.CompletedProcess(argv, code, out, err)
 
     def mutations(self):
         return [args[1] for args, _ in self.calls if args[0] == '/bin/launchctl' and args[1] != 'print']
@@ -198,6 +208,49 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaises(ctl.ControlError):
             self.control.start()
         self.assertEqual(self.system.mutations(), ['bootstrap'])
+
+    def test_launchctl_print_failure_cannot_mutate_job_or_installed_artifacts(self):
+        self.install()
+        paths = [self.s.config, self.s.command, self.s.plist]
+        saved = {path: path.read_bytes() for path in paths}
+        self.system.print_error = (1, 'Operation not permitted')
+        before = list(self.system.mutations())
+        for action in [self.control.stop, self.control.start, self.control.uninstall,
+                       lambda: self.control.install(self.source, self.job_source)]:
+            with self.subTest(action=action):
+                with self.assertRaises(ctl.ControlError):
+                    action()
+                self.assertEqual({path: path.read_bytes() for path in paths}, saved)
+                self.assertEqual(self.system.mutations(), before)
+
+    def test_launchctl_print_failure_on_first_install_cannot_register_job(self):
+        self.system.print_error = (1, 'Operation not permitted')
+        with self.assertRaises(ctl.ControlError):
+            self.install()
+        self.assertEqual(self.system.mutations(), [])
+        for path in [self.s.config, self.s.command, self.s.plist]:
+            self.assertFalse(path.exists())
+
+    def test_only_known_missing_service_error_means_unregistered(self):
+        for code, message in [(113, 'Could not connect to domain'),
+                              (113, 'Operation not permitted'),
+                              (1, f'Could not find service "{ctl.LABEL}" in domain for user gui: {os.getuid()}')]:
+            with self.subTest(code=code, message=message):
+                self.system.print_error = (code, message)
+                with self.assertRaises(ctl.ControlError):
+                    self.control.job()
+        self.assertEqual(self.system.mutations(), [])
+
+    def test_lsof_errors_cannot_be_treated_as_empty_ports_or_start_job(self):
+        self.install()
+        for code, message in [(1, 'Operation not permitted'), (2, ''), (2, 'usage'), (0, 'partial results')]:
+            with self.subTest(code=code, message=message):
+                self.system.lsof_error = (code, message)
+                with self.assertRaises(ctl.ControlError):
+                    self.control.listeners()
+                with self.assertRaises(ctl.ControlError):
+                    self.control.start()
+                self.assertEqual(self.system.mutations(), ['bootstrap'])
 
     def test_foreign_loaded_job_is_not_stopped_or_replaced(self):
         self.install()
