@@ -38,6 +38,8 @@ class FakeSystem:
         self.lsof_error = None
         self.concurrent_foreign_on_failed_bootstrap = False
         self.fail_bootouts = 0
+        self.keep_registration_after_bootout = False
+        self.foreign_during_preflight = False
 
     def clock(self):
         return self.now
@@ -91,7 +93,7 @@ class FakeSystem:
                 if self.fail_bootouts:
                     self.fail_bootouts -= 1
                     code = 5
-                else:
+                elif not self.keep_registration_after_bootout:
                     self.definition = None
                     self.pid = None
             elif action == 'kickstart':
@@ -118,7 +120,9 @@ class FakeSystem:
         elif argv[0] == '/bin/ps':
             out = str(self.parents.get(int(argv[-1]), 1))
         elif argv[0] == '/bin/zsh' and argv[-1] == '/usr/bin/true':
-            pass  # Public custody preflight, never invoke actual wrapper or SDK.
+            # Public custody preflight, never invoke actual wrapper or SDK.
+            if self.foreign_during_preflight:
+                self.definition = {'ProgramArguments': ['/bin/sleep', '60']}
         elif argv[0] == str(self.s.node) and argv[-1] in ('--version', '-v'):
             out = 'v26.13.0\n'
         else:
@@ -408,6 +412,59 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.s.log.exists())
         self.assertEqual((self.s.root / 'control.lock').stat().st_ino, lock_inode)
         self.assertTrue((self.s.root / ('controller-' + config['controllerSha256'] + '.py')).exists())
+
+    def test_uninstall_revalidates_foreign_replacement_after_graceful_stop(self):
+        self.install()
+        paths = [self.s.config, self.s.command, self.s.plist]
+        saved = {path: path.read_bytes() for path in paths}
+        original_stop = self.control._stop
+        def stop_then_replace(config):
+            original_stop(config)
+            self.system.definition = {'ProgramArguments': ['/bin/sleep', '60']}
+        with patch.object(self.control, '_stop', side_effect=stop_then_replace):
+            with self.assertRaises(ctl.ControlError):
+                self.control.uninstall()
+        self.assertNotIn('bootout', self.system.mutations())
+        self.assertEqual(self.system.definition, {'ProgramArguments': ['/bin/sleep', '60']})
+        self.assertEqual({path: path.read_bytes() for path in paths}, saved)
+
+    def test_upgrade_revalidates_foreign_replacement_during_custody_preflight(self):
+        self.install()
+        paths = [self.s.config, self.s.command, self.s.plist]
+        saved = {path: path.read_bytes() for path in paths}
+        self.source.write_text('# revised controller\n')
+        self.system.foreign_during_preflight = True
+        with self.assertRaises(ctl.ControlError):
+            self.control.install(self.source, self.job_source)
+        self.assertNotIn('bootout', self.system.mutations())
+        self.assertEqual(self.system.definition, {'ProgramArguments': ['/bin/sleep', '60']})
+        self.assertEqual({path: path.read_bytes() for path in paths}, saved)
+
+    def test_successful_bootout_with_registration_remaining_preserves_artifacts(self):
+        self.install()
+        paths = [self.s.config, self.s.command, self.s.plist]
+        saved = {path: path.read_bytes() for path in paths}
+        self.system.keep_registration_after_bootout = True
+        with self.assertRaises(ctl.ControlError):
+            self.control.uninstall()
+        self.assertEqual(self.system.mutations(), ['bootstrap', 'bootout'])
+        self.assertIsNotNone(self.system.definition)
+        self.assertEqual({path: path.read_bytes() for path in paths}, saved)
+
+    def test_uninstall_revalidates_job_still_idle_before_bootout(self):
+        self.install()
+        paths = [self.s.config, self.s.command, self.s.plist]
+        saved = {path: path.read_bytes() for path in paths}
+        original_stop = self.control._stop
+        def stop_then_start_elsewhere(config):
+            original_stop(config)
+            self.system.pid = 70001
+        with patch.object(self.control, '_stop', side_effect=stop_then_start_elsewhere):
+            with self.assertRaises(ctl.ControlError):
+                self.control.uninstall()
+        self.assertNotIn('bootout', self.system.mutations())
+        self.assertEqual(self.system.pid, 70001)
+        self.assertEqual({path: path.read_bytes() for path in paths}, saved)
 
     def test_modified_immutable_controller_is_refused_before_start(self):
         config = self.install()

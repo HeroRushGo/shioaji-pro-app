@@ -161,6 +161,15 @@ class Controller:
                     or job.get('path') != str(self.s.plist)):
             raise ControlError('loaded job is not this managed definition')
 
+    def bootout(self, config, require_idle=True):
+        # Use fresh ownership evidence at every removal entry, never a job
+        # snapshot from before readiness/custody checks.
+        current = self.job(); self.validate_job(config, current)
+        if current is None: return
+        if require_idle and current.get('pid'): raise ControlError('job became active; refusing replacement')
+        if self.lc('bootout', self.s.target).returncode: raise ControlError('cannot unload managed definition')
+        if self.job() is not None: raise ControlError('job removal not confirmed; artifacts retained')
+
     @contextmanager
     def lock(self):
         self.s.root.mkdir(mode=0o700, parents=True, exist_ok=True); private(self.s.root, True)
@@ -295,7 +304,7 @@ class Controller:
             recovery_data = {'managed': MARKER, 'newConfig': config,
                              'previous': {str(p): {'bytesBase64': base64.b64encode(v[0]).decode(), 'mode': v[1]} if v else None for p, v in saved.items()}}
             atomic(recovery, json.dumps(recovery_data, indent=2).encode())
-            if old_job and self.lc('bootout', self.s.target).returncode: raise ControlError('cannot unload old idle definition; recovery snapshot retained')
+            if old_job: self.bootout(old_config)
             bootstrapped = False
             try:
                 atomic(self.s.plist, plistlib.dumps(self.definition(config)))
@@ -310,9 +319,7 @@ class Controller:
                     remaining = self.job()
                     if remaining:
                         if not bootstrapped: raise ControlError('registration is not owned by this attempt')
-                        self.validate_job(config, remaining)
-                        if self.lc('bootout', self.s.target).returncode or self.job() is not None:
-                            raise ControlError('cannot unload new definition')
+                        self.bootout(config, require_idle=False)
                 except ControlError:
                     raise ControlError('install rollback could not safely unload; artifacts and private recovery.json retained') from None
                 for path, previous in saved.items():
@@ -327,7 +334,7 @@ class Controller:
     def uninstall(self):
         with self.lock():
             config = self.load(); self._stop(config)
-            if self.job() and self.lc('bootout', self.s.target).returncode: raise ControlError('bootout failed')
+            self.bootout(config)
             self.s.plist.unlink(); self.s.command.unlink(); self.s.config.unlink()
             # Keep lock inode, immutable revisions and private logs for audit.
 
