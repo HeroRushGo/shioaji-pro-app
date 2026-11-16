@@ -12,6 +12,19 @@ export interface ResearchQuery {
     date: string;
     /** Zero-padded local time on the selected Asia/Taipei trading date. */
     cutoff: string;
+    sourceMode?: 'real' | 'fixture';
+    financeMode?: 'latest' | 'as_of';
+}
+
+export interface DatasetInfo {
+    status: 'ready' | 'missing' | 'not-retained' | 'invalid' | 'unavailable' | 'revoked';
+    source: string;
+    releaseId: string;
+    firstSeenAt: string | null;
+    notice: string;
+    provenance?: Record<string, unknown>;
+    actualAsOf?: string;
+    samplingMinutes?: number;
 }
 
 export interface ResearchSnapshot {
@@ -19,18 +32,20 @@ export interface ResearchSnapshot {
     name: string;
     market: string;
     status: 'ready' | 'missing';
-    source: 'fixture';
+    source: 'fixture' | 'real';
     releaseId: string;
     asOf: string;
     notice: string;
-    revenue: { period: string; revenueThousands: number; yoyPercent: number | null }[];
-    quarters: { period: string; eps: number | null; grossMarginPercent: number | null }[];
-    replay: { time: string; price: number; vwap: number; poc: number }[];
+    revenue: { period: string; revenueThousands: number | null; yoyPercent: number | null }[];
+    quarters: { period: string; eps: number | null; grossMarginPercent: number | null; epsBasis?: string }[];
+    replay: { time: string; price: number | null; vwap: number | null; poc: number | null }[];
+    finance: DatasetInfo;
+    replayInfo: DatasetInfo;
     decisionUse: 'awareness_only';
     decisionEligible: false;
 }
 
-function validateQuery(query: ResearchQuery): void {
+export function validateQuery(query: ResearchQuery): void {
     if (!/^\d{4}$/.test(query.symbol)) {
         throw new RangeError('研究代號必須是 4 碼數字。');
     }
@@ -44,6 +59,8 @@ function validateQuery(query: ResearchQuery): void {
     if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(query.cutoff)) {
         throw new RangeError('截止時間必須是 HH:mm（00:00–23:59，Asia/Taipei）。');
     }
+    if (query.sourceMode !== undefined && !['real', 'fixture'].includes(query.sourceMode)) throw new RangeError('未知資料模式。');
+    if (query.financeMode !== undefined && !['latest', 'as_of'].includes(query.financeMode)) throw new RangeError('未知財務時點模式。');
 }
 
 /** Pure adapter: query identity is preserved, including when data is absent. */
@@ -63,6 +80,10 @@ export function snapshotForQuery(query: ResearchQuery): ResearchSnapshot {
         revenue: fixture?.revenue ?? [],
         quarters: fixture?.quarters ?? [],
         replay: fixture?.replay.filter(row => row.time <= query.cutoff) ?? [],
+        finance: { status: fixture ? 'ready' : 'missing', source: 'fixture', releaseId: FIXTURE_RELEASE_ID,
+            firstSeenAt: null, notice: FIXTURE_NOTICE },
+        replayInfo: { status: fixture ? 'ready' : 'missing', source: 'fixture', releaseId: FIXTURE_RELEASE_ID,
+            firstSeenAt: null, notice: FIXTURE_NOTICE },
         decisionUse: 'awareness_only',
         decisionEligible: false,
     };
@@ -86,6 +107,12 @@ export async function loadResearchSnapshot(
     throwIfAborted(signal);
     // Capture the identity before yielding; callers may reuse their query object.
     const requested = { ...query };
+    validateQuery(requested);
+    if (requested.sourceMode === 'real') {
+        const { loadRealResearchSnapshot } = await import('./real-data');
+        throwIfAborted(signal);
+        return loadRealResearchSnapshot(requested, signal);
+    }
     await Promise.resolve();
     throwIfAborted(signal);
     return snapshotForQuery(requested);

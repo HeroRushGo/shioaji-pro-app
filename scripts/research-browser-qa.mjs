@@ -81,6 +81,11 @@ export default async (page) => {
     const reload = async () => {
         await flushCalls();
         await qa.reload();
+        await qa.getByLabel('資料來源', { exact: true }).waitFor();
+        // This suite retains the first-stage fixture/geometry contract. Fresh
+        // v2 workspaces deliberately default to real data; select fixture
+        // explicitly rather than depending on the former implicit default.
+        await qa.getByLabel('資料來源', { exact: true }).selectOption('fixture');
         await qa.locator('.nr-entity').first().waitFor();
     };
     const geometry = state => state.layout.map(({ i, x, y, w, h }) => ({ i, x, y, w, h }))
@@ -156,6 +161,7 @@ export default async (page) => {
 
     try {
         await qa.goto(`${origin}/research.html?popout=ticket&mockPendingConfirm&condDemo`);
+        await qa.getByLabel('資料來源', { exact: true }).selectOption('fixture');
         await qa.locator('.nr-entity').first().waitFor();
         assert(await panels().count() === 2, 'default panels');
         checks.push('trading query flags ignored');
@@ -181,7 +187,7 @@ export default async (page) => {
         const times = await first().locator('tbody th').allTextContents();
         assert(times.length && times.every(time => time <= '10:00'), 'future replay rows');
         checks.push('causal cursor prefix');
-        await qa.getByLabel('交易日', { exact: true }).selectOption('2026-11-12');
+        await qa.getByLabel('交易日', { exact: true }).fill('2026-11-12');
         await first().getByText('6488 · 2026-11-12', { exact: true }).waitFor();
         await panels().nth(1).getByRole('button', { name: '財務', exact: true }).click();
         await panels().nth(1).getByRole('region', { name: '示範季度財報表，可水平與垂直捲動' }).waitFor();
@@ -402,9 +408,19 @@ export default async (page) => {
         assert(ticketActions.length === 0, `unexpected trading shortcut events: ${JSON.stringify(ticketActions)}`);
         assert(dialogs.length === 0, `unexpected native dialogs: ${JSON.stringify(dialogs)}`);
         checks.push('all navigations: zero sj-ticket-action events and native dialogs');
-        const unexpected = calls.filter(call => !isViteHmr(call));
+        // Explicitly switching fresh default workspaces to fixture can abort
+        // legitimate initial local catalog/payload fetches. Broker/admin/SSE
+        // attempts remain forbidden; the dedicated real suite additionally
+        // checks every JSON URL against the catalog's exact allowlist.
+        const isLocalResearchFetch = call => {
+            const url = new URL(call.url, origin);
+            return call.kind === 'fetch' && url.origin === origin
+                && (url.pathname === '/research-data/catalog.json'
+                    || /^\/research-data\/releases\/[a-zA-Z0-9][a-zA-Z0-9_-]{0,159}\/[a-zA-Z0-9_-]+\.json$/.test(url.pathname));
+        };
+        const unexpected = calls.filter(call => !isViteHmr(call) && !isLocalResearchFetch(call));
         assert(unexpected.length === 0, `unexpected network attempts: ${JSON.stringify(unexpected)}`);
-        checks.push('all navigations: zero fetch/XHR/SSE/broker sockets; only identified Vite HMR allowed');
+        checks.push('all navigations: local research JSON fetches and identified Vite HMR only; zero XHR/SSE/broker sockets');
         assert(errors.length === 0, errors.join('; '));
         return { checks, blocked, entryStatuses, staticNavigation, calls, ticketActions, dialogs,
             renderedGeometryChecks, membershipChecks,

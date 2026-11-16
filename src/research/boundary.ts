@@ -42,7 +42,8 @@ export function assertResearchSources(sources: string[]): void {
 export function deniedResearchPath(url: string): boolean {
     try {
         const pathname = decodeURIComponent(new URL(url, 'http://127.0.0.1').pathname);
-        return /^\/(?:api|admin|stream|apps|dist|dist-research)(?:\/|$)/i.test(pathname)
+        return /^\/(?:api|admin|stream|apps|dist|dist-research|@fs|@vite\/\.\.)(?:\/|$)/i.test(pathname)
+            || /(?:^|\/)\.(?:research-data|git)(?:\/|$)/i.test(pathname)
             || (/\.html?$/i.test(pathname) && pathname !== '/research.html');
     } catch { return true; }
 }

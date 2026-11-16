@@ -26,3 +26,5 @@ __pycache__/
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/gen/schemas/
+# Node-local verified data; never publish local market exports in the source repo.
+.research-data/

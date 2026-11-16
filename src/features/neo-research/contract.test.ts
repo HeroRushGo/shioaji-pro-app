@@ -8,7 +8,7 @@ const observed = vi.hoisted(() => ({
     renders: [] as string[], mounts: [] as string[], unmounts: [] as string[],
 }));
 vi.mock('./NeoResearchPanel', () => ({
-    NeoResearchPanel: (props: { symbol: string; date?: string; cutoff?: string }) => {
+    NeoResearchPanel: (props: { symbol: string; date?: string; cutoff?: string; sourceMode?: string; financeMode?: string }) => {
         observed.renders.push(props.symbol);
         useEffect(() => {
             observed.mounts.push(props.symbol);
@@ -18,6 +18,8 @@ vi.mock('./NeoResearchPanel', () => ({
             'data-fixture': props.symbol,
             'data-date': props.date,
             'data-cutoff': props.cutoff,
+            'data-source-mode': props.sourceMode,
+            'data-finance-mode': props.financeMode,
         }, `fixture:${props.symbol}:123.45`);
     },
 }));
@@ -150,5 +152,21 @@ describe('contract-aware research renderer', () => {
             'data-fixture': '6488', 'data-date': '2026-11-12', 'data-cutoff': '10:00',
         });
         expect(observed.mounts).toEqual(['6488']);
+    });
+    it('passes explicit real/latest modes without relaxing contract identity', () => {
+        act(() => {
+            view = create(createElement(NeoContractResearchPanel, {
+                contract: contract(), sourceMode: 'real', financeMode: 'latest',
+            }));
+        });
+        expect(fixtureNodes()[0]!.props).toMatchObject({ 'data-source-mode': 'real', 'data-finance-mode': 'latest' });
+        act(() => {
+            view!.update(createElement(NeoContractResearchPanel, {
+                contract: contract({ exchange: 'OTC' }), sourceMode: 'real', financeMode: 'latest',
+            }));
+        });
+        expect(fixtureNodes()).toHaveLength(0);
+        expect(text(view!.root)).toContain('此商品沒有相符的研究資料');
+        expect(observed.unmounts).toEqual(['2330']);
     });
 });

@@ -2,6 +2,32 @@ import { describe, expect, it } from 'vitest';
 import { defaultWorkspace, MAX_PANELS, PANEL_SIZE_LIMITS, RESEARCH_GRID_LIMITS, restoreWorkspace } from './workspace';
 
 describe('research workspace boundary', () => {
+    it('starts new workspaces with explicitly real data and latest-available finance', () => {
+        expect(defaultWorkspace()).toMatchObject({ version: 2, sourceMode: 'real', financeMode: 'latest' });
+    });
+    it('migrates v1 to fixture/as_of without changing its selection, panels or geometry', () => {
+        const { sourceMode: _source, financeMode: _finance, ...legacy } = defaultWorkspace();
+        const stored = { ...legacy, version: 1, symbol: '6488', date: '2026-11-12', cutoff: '10:00' };
+        const restored = restoreWorkspace(JSON.stringify(stored));
+        expect(restored).toEqual({ ...stored, version: 2, sourceMode: 'fixture', financeMode: 'as_of' });
+        // Even forged new fields on an old schema cannot opt into real data.
+        expect(restoreWorkspace(JSON.stringify({ ...stored, sourceMode: 'real', financeMode: 'latest' })))
+            .toMatchObject({ sourceMode: 'fixture', financeMode: 'as_of' });
+    });
+    it('round trips real latest/as_of and arbitrary valid historical dates', () => {
+        for (const financeMode of ['latest', 'as_of'] as const) {
+            const stored = { ...defaultWorkspace(), date: '2024-02-29', financeMode };
+            expect(restoreWorkspace(JSON.stringify(stored))).toEqual(stored);
+        }
+    });
+    it('rejects malformed date or modes without silently promoting saved data to latest', () => {
+        expect(restoreWorkspace(JSON.stringify({ ...defaultWorkspace(), date: '2026-02-30' })).date)
+            .toBe(defaultWorkspace().date);
+        expect(restoreWorkspace(JSON.stringify({ ...defaultWorkspace(), sourceMode: 'external', financeMode: 'latest' })))
+            .toMatchObject({ sourceMode: 'fixture', financeMode: 'as_of' });
+        expect(restoreWorkspace(JSON.stringify({ ...defaultWorkspace(), financeMode: 'historical-ish' })))
+            .toMatchObject({ sourceMode: 'real', financeMode: 'as_of' });
+    });
     it('defaults safely for damaged or legacy trading workspaces', () => {
         expect(restoreWorkspace('{')).toEqual(defaultWorkspace());
         expect(restoreWorkspace(JSON.stringify({ blocks: [{ type: 'ticket' }] }))).toEqual(defaultWorkspace());

@@ -18,6 +18,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focu
 .research-build { color: #9da9ac; font: 11px ui-monospace, monospace; }
 .research-demo { min-height: 41px; display: flex; align-items: center; gap: 12px; padding: 8px 28px; background: #2a2315; color: #efd39c; font-size: 12px; border-bottom: 1px solid #51432b; }
 .research-demo span { margin-left: auto; color: #c8b38d; }
+.research-demo[data-source=real] { background: #142922; color: #b9e0d0; border-bottom-color: #305148; }
+.research-demo[data-source=real] span { color: #a4bfb5; }
+.research-catalog-notice { color: #a6b8ba; font-size: 10px; line-height: 1.7; overflow-wrap: anywhere; }
+.research-catalog-notice[role=alert] { color: #e8c18d; }
+.research-clock-note { margin: 14px 0 0; padding: 8px 10px; border-left: 2px solid #45665d; background: #15211d; color: #b4c8c1; font-size: 11px; }
 .research-body { display: flex; min-height: calc(100vh - 127px); }
 .research-sidebar { width: 210px; flex-shrink: 0; border-right: 1px solid #293237; padding: 26px 16px; display: flex; flex-direction: column; background: #0c1114; }
 .research-sidebar-title { display: flex; justify-content: space-between; font-size: 13px; font-weight: 650; color: #d8e0e1; }

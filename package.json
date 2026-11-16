@@ -14,6 +14,9 @@
         "build": "tsc -b && vite build",
         "test": "vitest run",
         "test:research-boundary": "node scripts/research-import-boundary-qa.mjs",
+        "test:research-data": "node --test scripts/research-data/*.node-test.mjs",
+        "research:finance": "node scripts/research-data/finance.mjs",
+        "research:neo": "node scripts/research-data/neo.mjs",
         "preview": "vite preview"
     },
     "dependencies": {
