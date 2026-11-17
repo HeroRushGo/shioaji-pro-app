@@ -943,6 +943,7 @@ export function CandleChart({
         let observedEpoch = streamConnectionEpoch();
         let sawLive = getStreamStatus() === 'live';
         let latestObservedTrade = -Infinity;
+        let historyCompleteThrough = frozenMinute;
         let closedHistory: Candle[] = drawnKeyRef.current === loadKey ? barsRef.current : [];
         loadedKeyRef.current = ''; // freeze tick updates while loading
         setLiveTailError(false);
@@ -1070,7 +1071,13 @@ export function CandleChart({
             const now = nowWallClockUtc();
             const sec = tf.minutes * 60;
             const from = tf.minutes >= 1440 ? Math.floor(now / 86400) * 86400 + 86400 : Math.floor(now / sec) * sec + sec;
-            const completed = closedHistory.filter((bar) => bar.time < (tf.minutes >= 1440 ? from - 86400 : from));
+            // A slow failure can cross a target boundary after history was
+            // sampled. Its formerly partial bucket is still incomplete then;
+            // failure-time alone must never promote it to a completed bar.
+            const through = Math.min(now, historyCompleteThrough);
+            const completed = closedHistory.filter((bar) => tf.minutes >= 1440
+                ? bar.time < Math.floor(through / 86400) * 86400
+                : bar.time <= through);
             live = new LiveCandleAccumulator(tf.minutes, acceptTime, stockCloseAuction);
             live.seed(completed, from, []);
             live.takeChanges();
@@ -1089,7 +1096,10 @@ export function CandleChart({
             if (next !== 'live') {
                 if (sawLive && !continuityBroken) {
                     continuityBroken = true;
-                    if (loadedKeyRef.current === loadKey) closedHistory = live.bars;
+                    if (loadedKeyRef.current === loadKey) {
+                        closedHistory = live.bars;
+                        historyCompleteThrough = Math.max(historyCompleteThrough, latestObservedTrade);
+                    }
                     failTail();
                     loadedKeyRef.current = '';
                 }
@@ -1167,6 +1177,7 @@ export function CandleChart({
                 const bars = aggregate(raw, tf.minutes);
                 closedHistory = bars;
                 rawRef.current = raw;
+                historyCompleteThrough = raw.at(-1)?.time ?? frozenMinute;
                 // Index KBars have no observation watermark or raw trade-tail
                 // endpoint. Keep closed bars until a fully observed target
                 // bucket begins; older quotes must not roll the close back.
@@ -1190,6 +1201,8 @@ export function CandleChart({
                     if (Math.max(knownBeforeLoad, latestObservedTrade) >= from) throw new Error('Live trade prefix unavailable');
                 }
                 live.seed(bars, from, prefix);
+                historyCompleteThrough = Math.max(historyCompleteThrough, latestObservedTrade,
+                    prefix.length ? wallClockToUtc(prefix.at(-1)!.datetime) : -Infinity);
                 applyBars(live.bars);
                 live.takeChanges();
                 loadedKeyRef.current = loadKey;

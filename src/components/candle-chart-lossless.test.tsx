@@ -299,6 +299,43 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(volumeAt('2026-10-08T09:10:00')).toBe(4);
     });
 
+    it('does not promote an old partial target bar when the tail request fails after its closing boundary', async () => {
+        setNow('2026-10-08T09:03:30');
+        let rejectTail!: (error: Error) => void;
+        const tail = new Promise<LiveCandlePrint[]>((_resolve, reject) => { rejectTail = reject; });
+        m.history.mockResolvedValueOnce(kbars([
+            ['2026-10-07T09:00:00', '2026-10-07T09:05:00', () => 100],
+            ['2026-10-08T09:00:00', '2026-10-08T09:04:00', () => 50],
+        ]));
+        m.tail.mockReturnValueOnce(tail);
+        const renderer = mount({ interval: '5m' });
+        await settle();
+        expect(m.tail).toHaveBeenCalledTimes(1);
+        // Clock time passing cannot fill the missing 09:04/09:05 source data.
+        setNow('2026-10-08T09:07:00');
+        rejectTail(new Error('fixture slow tail unavailable'));
+        await settle();
+        await draw();
+        const incomplete = () => renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete');
+        expect(incomplete()).toHaveLength(1);
+        expect(candleAt('2026-10-07T09:05:00')).toMatchObject({ open: 100, close: 100 });
+        expect(volumeAt('2026-10-07T09:05:00')).toBe(50);
+        expect(candleAt('2026-10-08T09:05:00')).toBeUndefined();
+        expect(volumeAt('2026-10-08T09:05:00')).toBeUndefined();
+        act(() => tick('09:07:30.000001', 1, 999));
+        await draw();
+        expect(candleAt('2026-10-08T09:10:00')).toBeUndefined();
+        setNow('2026-10-08T09:10:00');
+        act(() => tick('09:10:00.000001', 110, 4));
+        await draw();
+        expect(candleAt('2026-10-08T09:05:00')).toBeUndefined();
+        expect(candleAt('2026-10-08T09:10:00')).toBeUndefined();
+        expect(candleAt('2026-10-08T09:15:00')).toMatchObject({ open: 110, high: 110, low: 110, close: 110 });
+        expect(volumeAt('2026-10-08T09:15:00')).toBe(4);
+        expect(readout(renderer, 'volume')).toBe('量4');
+        expect(incomplete()).toHaveLength(0);
+    });
+
     it.each(['contract', 'timeframe', 'session', 'unmount'] as const)('clears the pending draw and raw subscription when %s changes', async (change) => {
         m.history.mockResolvedValueOnce(initial()).mockReturnValue(new Promise(() => {}));
         const props = { contract: future, interval: '1m', onIntervalChange: () => {}, sessionMode: 'all', onSessionModeChange: () => {} };
