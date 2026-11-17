@@ -942,6 +942,7 @@ export function CandleChart({
         let continuityBroken = false;
         let observedEpoch = streamConnectionEpoch();
         let sawLive = getStreamStatus() === 'live';
+        let latestObservedTrade = -Infinity;
         let closedHistory: Candle[] = drawnKeyRef.current === loadKey ? barsRef.current : [];
         loadedKeyRef.current = ''; // freeze tick updates while loading
         setLiveTailError(false);
@@ -996,6 +997,8 @@ export function CandleChart({
             if (!canonical || print.simtrade || !Number.isFinite(print.close) || print.close <= 0) return;
             const time = wallClockToUtc(canonical);
             if (acceptTime && !acceptTime(time)) return;
+            if (!Number.isFinite(print.volume) || print.volume < 0) return;
+            if (print.volume > 0) latestObservedTrade = Math.max(latestObservedTrade, time);
             const sec = tf.minutes * 60;
             const bucket = tf.minutes >= 1440 ? Math.floor(time / 86400) * 86400 : Math.floor(time / sec) * sec + sec;
             if (!recovering && loadedKeyRef.current === loadKey && live.last && bucket - live.last.time > sec * 3 && Date.now() - gapReloadAtRef.current > 120_000) {
@@ -1177,9 +1180,14 @@ export function CandleChart({
                 const from = raw.at(-1)?.time ?? fallbackFrom;
                 const prefix = await loadLiveCandleTail(contract, from, requestRevision);
                 if (cancelled || continuityBroken || !candleSeriesRef.current) return;
-                if (prefix.length === 0 && seedTick && !seedTick.simtrade && seedTick.volume > 0) {
-                    const time = canonicalCandleTime(`${seedTick.date}T${seedTick.time}`);
-                    if (time && wallClockToUtc(time) >= from) throw new Error('Live trade prefix unavailable');
+                if (prefix.length === 0) {
+                    const time = seedTick && !seedTick.simtrade && seedTick.volume > 0
+                        ? canonicalCandleTime(`${seedTick.date}T${seedTick.time}`) : null;
+                    const knownBeforeLoad = time ? wallClockToUtc(time) : -Infinity;
+                    // REST can lag the stream: observing any uncovered fill
+                    // contradicts an empty tail, including fills first seen
+                    // while history was loading. Never certify that partial bar.
+                    if (Math.max(knownBeforeLoad, latestObservedTrade) >= from) throw new Error('Live trade prefix unavailable');
                 }
                 live.seed(bars, from, prefix);
                 applyBars(live.bars);

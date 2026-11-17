@@ -214,6 +214,34 @@ describe('CandleChart lossless raw trade aggregation', () => {
     });
 
 
+    it.each(['missing', 'old', 'simtrade'] as const)('rejects an empty REST prefix after a real buffered print with a %s request-start quote', async (seed) => {
+        const history = deferred<ReturnType<typeof kbars>>();
+        m.history.mockReturnValueOnce(history.promise);
+        if (seed === 'old') act(() => tick('08:59:59.000001', 100, 3));
+        if (seed === 'simtrade') act(() => tick('09:00:00.000001', 1, 999, stock.code, { simtrade: true }));
+        const renderer = mount();
+        await settle();
+        act(() => tick('09:00:31.000001', 105, 7));
+        history.resolve(initial());
+        await settle();
+        await draw();
+        const incomplete = () => renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete');
+        expect(m.tail).toHaveBeenCalledTimes(1);
+        expect(incomplete()).toHaveLength(1);
+        expect(candleAt('2026-10-08T09:01:00')).toBeUndefined();
+        expect(volumeAt('2026-10-08T09:00:00')).toBe(10);
+        act(() => tick('09:00:59.000001', 120, 9));
+        await draw();
+        expect(candleAt('2026-10-08T09:01:00')).toBeUndefined();
+        expect(incomplete()).toHaveLength(1);
+        setNow('2026-10-08T09:01:00');
+        act(() => tick('09:01:00.000001', 110, 4));
+        await draw();
+        expect(candleAt('2026-10-08T09:02:00')).toMatchObject({ open: 110, high: 110, low: 110, close: 110 });
+        expect(volumeAt('2026-10-08T09:02:00')).toBe(4);
+        expect(incomplete()).toHaveLength(0);
+    });
+
     it.each(['1m', '1D'])('counts the 13:30 stock closing auction exactly once in %s history and REST handoff', async (interval) => {
         setNow('2026-10-08T13:30:20');
         const history = deferred<ReturnType<typeof kbars>>();
