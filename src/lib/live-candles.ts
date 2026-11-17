@@ -189,6 +189,9 @@ export class LiveCandleAccumulator {
         // preceding interval; continuous prints at other boundaries open the
         // next interval. Keep the original fractional timestamp for ordering.
         const closeAuction = this.stockCloseAuction && print.wallSeconds % DAY_SECONDS === STOCK_CLOSE_SECONDS;
+        // A fallback cutoff at the closing boundary discarded that preceding
+        // bucket. An auction stamped on the boundary cannot revive its gap.
+        if (closeAuction && print.wallSeconds === this.cutoff) return;
         const time = this.daily
             ? Math.floor(print.wallSeconds / DAY_SECONDS) * DAY_SECONDS
             : closeAuction

@@ -242,6 +242,44 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(incomplete()).toHaveLength(0);
     });
 
+    it('rejects a nonempty REST prefix that omits the known real request-start print', async () => {
+        setNow('2026-10-08T10:00:30');
+        m.history.mockResolvedValueOnce(kbars([['2026-10-08T09:59:00', '2026-10-08T10:00:00', () => 100]]));
+        m.tail.mockResolvedValueOnce([
+            { datetime: '2026-10-08T10:00:05.000001', close: 100, volume: 2, tickType: 1 },
+        ]);
+        // This known low cannot disappear behind an older, lagging REST response.
+        act(() => tick('10:00:20.000001', 90, 7));
+        const renderer = mount();
+        await settle();
+        await draw();
+        expect(m.tail).toHaveBeenCalledTimes(1);
+        expect(renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete')).toHaveLength(1);
+        expect(candleAt('2026-10-08T10:01:00')).toBeUndefined();
+        expect(volumeAt('2026-10-08T10:00:00')).toBe(10);
+        expect((histogram().last as any[]).reduce((sum, bar) => sum + bar.value, 0)).toBe(10);
+    });
+
+    it('does not revive an incomplete 15m bar with a closing auction at the recovery cutoff', async () => {
+        setNow('2026-10-08T13:20:30');
+        m.history.mockResolvedValueOnce(kbars([
+            ['2026-10-07T13:00:00', '2026-10-07T13:15:00', () => 100],
+            ['2026-10-08T13:15:00', '2026-10-08T13:21:00', () => 50],
+        ]));
+        m.tail.mockRejectedValueOnce(new Error('fixture auction prefix unavailable'));
+        const renderer = mount({ interval: '15m' });
+        await settle();
+        expect(candleAt('2026-10-08T13:30:00')).toBeUndefined();
+        expect(volumeAt('2026-10-07T13:15:00')).toBe(150);
+        setNow('2026-10-08T13:30:00');
+        act(() => tick('13:30:00.000000', 110, 6801));
+        await draw();
+        expect(candleAt('2026-10-08T13:30:00')).toBeUndefined();
+        expect(candleAt('2026-10-08T13:45:00')).toBeUndefined();
+        expect((histogram().last as any[]).reduce((sum, bar) => sum + bar.value, 0)).toBe(150);
+        expect(renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete')).toHaveLength(1);
+    });
+
     it.each(['1m', '1D'])('counts the 13:30 stock closing auction exactly once in %s history and REST handoff', async (interval) => {
         setNow('2026-10-08T13:30:20');
         const history = deferred<ReturnType<typeof kbars>>();
@@ -427,6 +465,8 @@ describe('CandleChart lossless raw trade aggregation', () => {
         m.history.mockResolvedValueOnce(initial()).mockReturnValueOnce(stale.promise).mockReturnValueOnce(recovered.promise);
         m.tail.mockResolvedValueOnce([]).mockResolvedValueOnce([
             { datetime: '2026-10-08T09:00:31.000001', close: 101, volume: 4, tickType: 1 },
+            // A real trade seen during DOWN is recovered from the authoritative tail.
+            { datetime: '2026-10-08T09:00:32.000001', close: 1, volume: 999, tickType: 1 },
             { datetime: '2026-10-08T09:00:34.000001', close: 109, volume: 3, tickType: 1 },
         ]);
         act(() => m.options!.onWire({ kind: 'status', status: 'live', heartbeat: Date.now() }));
@@ -453,15 +493,15 @@ describe('CandleChart lossless raw trade aggregation', () => {
         recovered.resolve(initial());
         await settle();
         await draw();
-        expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 109, low: 101, close: 109 });
-        expect(volumeAt('2026-10-08T09:01:00')).toBe(7);
+        expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 109, low: 1, close: 109 });
+        expect(volumeAt('2026-10-08T09:01:00')).toBe(1006);
         const sets = candles().setData.mock.calls.length;
         stale.resolve(kbars([['2026-10-08T08:59:00', '2026-10-08T09:01:00', () => 999]]));
         await settle();
         await draw();
         expect(candles().setData.mock.calls.length).toBe(sets);
-        expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 109, low: 101, close: 109 });
-        expect(volumeAt('2026-10-08T09:01:00')).toBe(7);
+        expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 109, low: 1, close: 109 });
+        expect(volumeAt('2026-10-08T09:01:00')).toBe(1006);
     });
 
     it('aggregates index prices through the raw quote_idx stream with zero trade volume', async () => {

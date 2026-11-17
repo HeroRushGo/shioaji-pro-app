@@ -1191,10 +1191,18 @@ export function CandleChart({
                 const from = raw.at(-1)?.time ?? fallbackFrom;
                 const prefix = await loadLiveCandleTail(contract, from, requestRevision);
                 if (cancelled || continuityBroken || !candleSeriesRef.current) return;
+                const knownTime = seedTick && !seedTick.simtrade && seedTick.volume > 0
+                    ? canonicalCandleTime(`${seedTick.date}T${seedTick.time}`) : null;
+                const knownBeforeLoad = knownTime ? wallClockToUtc(knownTime) : -Infinity;
+                if (knownTime && knownBeforeLoad >= from && !prefix.some((print) =>
+                    canonicalCandleTime(print.datetime) === knownTime
+                    && print.close === Number(seedTick!.close) && print.volume === seedTick!.volume
+                    && (print.tickType ?? null) === (seedTick!.tick_type ?? null))) {
+                    // A nonempty but lagging REST response can still omit the
+                    // last fill already known before this observer subscribed.
+                    throw new Error('Live trade prefix omits a known fill');
+                }
                 if (prefix.length === 0) {
-                    const time = seedTick && !seedTick.simtrade && seedTick.volume > 0
-                        ? canonicalCandleTime(`${seedTick.date}T${seedTick.time}`) : null;
-                    const knownBeforeLoad = time ? wallClockToUtc(time) : -Infinity;
                     // REST can lag the stream: observing any uncovered fill
                     // contradicts an empty tail, including fills first seen
                     // while history was loading. Never certify that partial bar.

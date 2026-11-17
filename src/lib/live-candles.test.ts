@@ -289,6 +289,25 @@ describe('LiveCandleAccumulator', () => {
         }]);
     });
 
+    it.each([1, 5, 15])('does not revive a discarded %i-minute bucket with an auction at the fallback cutoff', minutes => {
+        const accumulator = new LiveCandleAccumulator(minutes, undefined, true);
+        accumulator.seed([], second('13:30:00'), []);
+        accumulator.takeChanges();
+        accumulator.push(print('13:30:00.000000', 2170, 6801, 2));
+        expect(accumulator.bars).toEqual([]);
+        expect(accumulator.last).toBeNull();
+        expect(accumulator.takeChanges()).toEqual({ bars: [], reset: false, appended: false });
+    });
+
+    it('also rejects buffered and REST closing-auction copies at a fallback cutoff', () => {
+        const accumulator = new LiveCandleAccumulator(1, undefined, true);
+        const auction = print('13:30:00.123456', 2170, 6801, 2);
+        accumulator.push(auction);
+        accumulator.seed([], second('13:30:00'), [auction]);
+        expect(accumulator.bars).toEqual([]);
+        expect(accumulator.takeChanges()).toEqual({ bars: [], reset: true, appended: false });
+    });
+
     it('keeps microsecond ordering within the stock closing-auction second', () => {
         const accumulator = new LiveCandleAccumulator(1, undefined, true);
         accumulator.seed([], second('13:29:00'), []);
