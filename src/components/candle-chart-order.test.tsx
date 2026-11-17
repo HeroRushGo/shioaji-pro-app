@@ -52,6 +52,12 @@ vi.mock('../hooks/use-stream', () => ({ useQuote: (code: string | null, o?: { od
     const close = o?.oddLot ? m.oddClose : m.roundClose;
     return close === null ? undefined : { tick: { code, date: '2026/09/30', time: '11:00:00', close, volume: 1 }, seq: 1, lastDir: 0, flashSeq: 0 };
 } }));
+vi.mock('../lib/stream', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/stream')>(), getQuote: () => undefined, onAnyTick: () => () => {}, onAnyIndexQuote: () => () => {} }));
+vi.mock('../lib/live-candle-history', () => ({ loadLiveCandleTail: async () => [] }));
+vi.mock('../lib/quote-ownership', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../lib/quote-ownership')>(),
+    retainQuoteWithReady: () => ({ ready: Promise.resolve(), release: () => {} }),
+}));
 vi.mock('../lib/chart-history', () => ({ fetchChartHistory: async () => ({ candles: [], exhausted: true }), nextChartHistoryRevision: () => 1 }));
 vi.mock('lightweight-charts', async () => {
     const h = await import('./chart-session.test-harness');

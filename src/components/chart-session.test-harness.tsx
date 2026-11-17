@@ -14,6 +14,7 @@ export interface FakeSeries {
 export const created: FakeSeries[] = [];
 // 圖表訂閱的 crosshair 回呼（測試用來模擬游標移動／離開）
 export const crosshairHandlers: ((param: any) => void)[] = [];
+export const logicalRangeHandlers: ((range: { from: number; to: number } | null) => void)[] = [];
 
 function chain(): any {
     const f: any = function () {
@@ -42,7 +43,16 @@ export function makeSeries(kind: string): any {
         setData: vi.fn((d: unknown[]) => {
             s.last = d;
         }),
-        update: vi.fn(),
+        update: vi.fn((point: any, historicalUpdate = false) => {
+            const time = point.time;
+            const latest = s.last.at(-1) as { time: number } | undefined;
+            if (latest && time < latest.time && !historicalUpdate)
+                throw new Error('Cannot update oldest data without historicalUpdate');
+            const index = s.last.findIndex((existing: any) => existing.time === time);
+            s.last = index >= 0
+                ? s.last.map((existing, at) => at === index ? { ...point } : existing)
+                : [...s.last, { ...point }].sort((a: any, b: any) => a.time - b.time);
+        }),
         options: {},
         priceLines: [],
     };
@@ -71,6 +81,11 @@ export function makeChart(): any {
             get: (_t, p) => {
                 if (p === 'addSeries')
                     return (type: { kind: string }) => makeSeries(type.kind);
+                if (p === 'timeScale') return () => new Proxy({}, {
+                    get: (_scale, key) => key === 'subscribeVisibleLogicalRangeChange'
+                        ? (handler: (range: { from: number; to: number } | null) => void) => { logicalRangeHandlers.push(handler); }
+                        : chain()[key],
+                });
                 if (p === 'subscribeCrosshairMove')
                     return (fn: (param: any) => void) => {
                         crosshairHandlers.push(fn);

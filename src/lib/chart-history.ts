@@ -11,7 +11,7 @@ export const nextChartHistoryRevision = () => ++revision;
 const requests = new Map<string, Promise<KBars>>();
 /** Presentation rebuilds reuse history, including failures. A manual revision
  * or a new date range explicitly permits another bounded fetchKbars attempt. */
-export function fetchChartHistory(contract: ContractBase, start: string, end: string, opts?: { timeoutMs?: number; revision?: number }) {
+export function fetchChartHistory(contract: ContractBase, start: string, end: string, opts?: { timeoutMs?: number; revision?: number | string }) {
     const key = JSON.stringify([getApiBase(), contract, start, end, opts?.revision ?? 0]);
     let request = requests.get(key);
     if (!request) {

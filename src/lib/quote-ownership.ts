@@ -1,6 +1,6 @@
 import { getApiBase } from './runtime';
 import { subscribeQuote, unsubscribeQuote } from './shioaji';
-import { getStreamStatus, isStreamOwner, subscribeStatusStore, subscribeStreamOwner } from './stream';
+import { getStreamStatus, isStreamOwner, onContractEvent, streamConnectionEpoch, subscribeStatusStore, subscribeStreamOwner } from './stream';
 import type { ContractBase } from './types/contract';
 import type { QuoteTypeName } from './types/market';
 
@@ -17,6 +17,16 @@ const local = new Map<string, { desired: Desired; refs: number }>();
 const clients = new Map<string, Map<string, Desired>>();
 const active = new Map<string, Desired>();
 const canOwn = () => !mirror || isStreamOwner();
+let disposed = false;
+let ackSerial = 0;
+let ackGeneration = 0;
+const ackEpochs = new Map<string, number>();
+const ackAttempts = new Map<string, { epoch: number; generation: number; serial: number; pending?: boolean; error?: unknown }>();
+const confirming = new Map<string, Promise<number>>();
+const readinessChecks = new Set<() => void>();
+const readinessCancels = new Set<(error: Error) => void>();
+const remoteReadiness = new Map<string, { receive: (message: Record<string, unknown>) => void }>();
+export const QUOTE_READY_TIMEOUT_MS = 30_000;
 // #386 pagehide 時退訂是一筆接一筆 await，實測頁面卸載後只送得出第一筆，重新整理
 // 留下的訂閱會在 sidecar 累積。所以記下這個頁面訂閱過什麼（sessionStorage：重新
 // 整理還在、分頁之間不共用），下一次載入等消費者都掛上後，只退掉記錄裡沒人要的。
@@ -55,6 +65,22 @@ function forget(key: string) {
 let queue = Promise.resolve();
 const keyOf = (d: Desired) => JSON.stringify([d.contract.security_type, d.contract.exchange, d.contract.target_code || d.contract.code, d.type, ...(d.odd ? ['odd'] : [])]);
 const oddOpts = (d: Desired) => (d.odd ? [{ oddLot: true }] as const : [] as const);
+async function subscribeOwned(key: string, desired: Desired): Promise<void> {
+    const epoch = streamConnectionEpoch();
+    const generation = ackGeneration;
+    const serial = ++ackSerial;
+    if (!disposed) ackAttempts.set(key, { epoch, generation, serial, pending: true });
+    try {
+        const response = await subscribeQuote(desired.contract, desired.type, ...oddOpts(desired));
+        if (!response.success) throw new Error(response.message || '行情訂閱失敗');
+        if (!disposed) ackAttempts.set(key, { epoch, generation, serial });
+        if (!disposed && generation === ackGeneration && epoch >= 0 && getStreamStatus() === 'live' && streamConnectionEpoch() === epoch && canOwn()) ackEpochs.set(key, epoch);
+    } catch (error) {
+        ackEpochs.delete(key);
+        if (!disposed) ackAttempts.set(key, { epoch, generation, serial, error });
+        throw error;
+    }
+}
 // A consumer that remounts (e.g. contract metadata refreshed after a
 // reconnect) releases and re-retains asynchronously. Unsubscribing in that
 // gap caused an unsubscribe+subscribe pair per quote on every reconnect, on
@@ -84,14 +110,14 @@ function sync(immediate = false) {
             // 先記再送：請求送出後頁面才卸載，訂閱也不會漏記
             remember(key, value);
             channel?.postMessage({ kind: 'held', keys: [key] }); // 別的分頁正準備清理時也要看得到
-            try { await subscribeQuote(value.contract, value.type, ...oddOpts(value)); active.set(key, value); } catch { /* reconnect registry/manual re-acquire retries */ }
+            try { await subscribeOwned(key, value); active.set(key, value); } catch { /* reconnect registry/manual re-acquire retries */ }
         }
         if (![...active.keys()].some(key => !desired.has(key))) return;
         if (!immediate) await new Promise(resolve => setTimeout(resolve, RELEASE_GRACE_MS));
         const still = immediate ? desired : desiredNow();
         for (const [key, value] of active) if (!still.has(key)) {
             if (!canOwn()) return;
-            try { await unsubscribeQuote(value.contract, value.type, ...oddOpts(value)); active.delete(key); forget(key); } catch { /* preserve ownership for a later retry */ }
+            try { await unsubscribeQuote(value.contract, value.type, ...oddOpts(value)); active.delete(key); ackEpochs.delete(key); forget(key); } catch { /* preserve ownership for a later retry */ }
         }
     });
 }
@@ -121,7 +147,116 @@ function scheduleOrphanSweep() {
         sweepTimer = setTimeout(sweepOrphans, HELD_REPLY_MS);
     }, ORPHAN_SWEEP_DELAY_MS - HELD_REPLY_MS);
 }
+function readinessError(message: string): Error { return new Error(`行情訂閱尚未就緒：${message}`); }
+function abortedReadiness(): Error { const error = readinessError('已取消'); error.name = 'AbortError'; return error; }
+function readinessSerial(desired: Desired): number {
+    const attempt = ackAttempts.get(keyOf(desired));
+    return attempt?.pending ? attempt.serial - 1 : ackSerial;
+}
+
+function confirmOwned(desired: Desired, epoch: number, afterSerial: number): Promise<number> {
+    const key = keyOf(desired);
+    const generation = ackGeneration;
+    const identity = JSON.stringify([key, epoch, generation]);
+    const existing = confirming.get(identity);
+    if (existing) return existing;
+    const request = queue.catch(() => undefined).then(async () => {
+        if (disposed || generation !== ackGeneration || !canOwn() || getStreamStatus() !== 'live' || streamConnectionEpoch() !== epoch) throw readinessError('串流世代已變更');
+        if (!desiredNow().has(key)) throw abortedReadiness();
+        if (ackEpochs.get(key) === epoch) return epoch;
+        const attempt = ackAttempts.get(key);
+        if (attempt?.epoch === epoch && attempt.generation === generation && attempt.serial > afterSerial && attempt.error !== undefined) throw attempt.error;
+        remember(key, desired);
+        channel?.postMessage({ kind: 'held', keys: [key] });
+        await subscribeOwned(key, desired);
+        if (disposed || !canOwn() || getStreamStatus() !== 'live' || streamConnectionEpoch() !== epoch || ackEpochs.get(key) !== epoch) throw readinessError('訂閱回應跨越串流世代');
+        active.set(key, desired);
+        return epoch;
+    });
+    queue = request.then(() => undefined, () => undefined);
+    confirming.set(identity, request);
+    const cleanup = () => { if (confirming.get(identity) === request) confirming.delete(identity); };
+    void request.then(cleanup, cleanup);
+    return request;
+}
+
+function waitUntilReady(desired: Desired, afterSerial: number, ownerOnly = false): { ready: Promise<void>; cancel: (error: Error) => void } {
+    let settled = false;
+    let started = false;
+    let epoch = -1;
+    let generation = -1;
+    let owned = false;
+    let nonce: string | undefined;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const ready = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    const timer = setTimeout(() => finish(readinessError('等待訂閱確認逾時')), QUOTE_READY_TIMEOUT_MS);
+    const finish = (error?: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        readinessChecks.delete(check);
+        readinessCancels.delete(cancel);
+        if (nonce) remoteReadiness.delete(nonce);
+        if (error !== undefined) reject(error); else resolve();
+    };
+    const cancel = (error: Error) => finish(error);
+    const check = () => {
+        if (settled) return;
+        if (disposed || (ownerOnly && !canOwn())) { finish(readinessError('訂閱擁有者已變更')); return; }
+        if (started) {
+            if (generation !== ackGeneration || getStreamStatus() !== 'live' || streamConnectionEpoch() !== epoch || canOwn() !== owned) finish(readinessError('串流世代已變更'));
+            return;
+        }
+        if (getStreamStatus() !== 'live') return;
+        epoch = streamConnectionEpoch();
+        generation = ackGeneration;
+        if (epoch < 0) return;
+        owned = canOwn();
+        started = true;
+        if (owned) {
+            void confirmOwned(desired, epoch, afterSerial).then(() => {
+                if (generation === ackGeneration && getStreamStatus() === 'live' && streamConnectionEpoch() === epoch && canOwn()) finish();
+                else finish(readinessError('串流世代已變更'));
+            }, error => finish(error));
+        } else {
+            if (!channel) { finish(readinessError('無訂閱擁有者通道')); return; }
+            nonce = typeof crypto !== 'undefined' ? crypto.randomUUID() : `${client}:${Math.random()}`;
+            const key = keyOf(desired);
+            remoteReadiness.set(nonce, { receive(message) {
+                if (message.key !== key || message.epoch !== epoch) return;
+                if (generation !== ackGeneration || getStreamStatus() !== 'live' || streamConnectionEpoch() !== epoch || canOwn()) { finish(readinessError('串流世代已變更')); return; }
+                if (message.ok === true && Number.isSafeInteger(message.ownerEpoch) && Number(message.ownerEpoch) >= 0) finish();
+                else finish(readinessError(typeof message.error === 'string' ? message.error : '擁有者拒絕確認'));
+            } });
+            // retainQuote already published this client's desired set. Channel
+            // FIFO ordering makes that ownership visible before this request.
+            channel.postMessage({ kind: 'quote-ready?', client, nonce, key, epoch });
+        }
+    };
+    readinessChecks.add(check);
+    readinessCancels.add(cancel);
+    check();
+    return { ready, cancel };
+}
+
 channel?.addEventListener('message', e => {
+    if (e.data?.kind === 'quote-ready' && e.data.to === client && typeof e.data.nonce === 'string') {
+        remoteReadiness.get(e.data.nonce)?.receive(e.data);
+        return;
+    }
+    if (e.data?.kind === 'quote-ready?' && canOwn() && typeof e.data.client === 'string' && typeof e.data.nonce === 'string' && typeof e.data.key === 'string' && Number.isSafeInteger(e.data.epoch)) {
+        const { client: to, nonce, key, epoch } = e.data;
+        const desired = clients.get(to)?.get(key);
+        if (!desired) { channel?.postMessage({ kind: 'quote-ready', to, nonce, key, epoch, ok: false, error: '請求端尚未持有此訂閱' }); return; }
+        const pending = waitUntilReady(desired, readinessSerial(desired), true);
+        void pending.ready.then(() => {
+            if (!disposed) channel?.postMessage({ kind: 'quote-ready', to, nonce, key, epoch, ok: true, ownerEpoch: streamConnectionEpoch() });
+        }, error => {
+            if (!disposed) channel?.postMessage({ kind: 'quote-ready', to, nonce, key, epoch, ok: false, error: error instanceof Error ? error.message : String(error) });
+        });
+        return;
+    }
     if (e.data?.kind === 'hello') { if (!canOwn()) sync(); return; }
     if (e.data?.kind === 'held?') {
         if (canOwn()) channel?.postMessage({ kind: 'held', keys: [...active.keys(), ...desiredNow().keys()] });
@@ -139,12 +274,23 @@ channel?.addEventListener('message', e => {
 });
 if (!mirror) channel?.postMessage({ kind: 'hello' });
 const stopStatus = subscribeStatusStore(() => {
+    if (getStreamStatus() !== 'live') { ackEpochs.clear(); ackGeneration++; }
     if (getStreamStatus() === 'live') { sync(); scheduleOrphanSweep(); }
+    for (const check of readinessChecks) check();
 });
 const stopOwner = subscribeStreamOwner(() => {
-    if (!canOwn()) { active.clear(); clients.clear(); }
+    ackEpochs.clear();
+    ackGeneration++;
+    if (!canOwn()) { active.clear(); clients.clear(); ackEpochs.clear(); }
     if (canOwn()) channel?.postMessage({ kind: 'hello' });
     sync();
+    for (const check of readinessChecks) check();
+});
+const stopContract = onContractEvent(event => {
+    if (event.action !== 'MAINTENANCE') return;
+    ackEpochs.clear();
+    ackGeneration++;
+    for (const check of readinessChecks) check();
 });
 scheduleOrphanSweep();
 export interface RetainOptions {
@@ -166,6 +312,26 @@ export function retainQuote(contract: ContractBase, type: QuoteTypeName, options
         else local.delete(key);
         sync();
     };
+}
+/** Retain shared ownership and await a broker ACK from the same LIVE epoch. */
+export function retainQuoteWithReady(contract: ContractBase, type: QuoteTypeName, options?: RetainOptions & { signal?: AbortSignal }): { ready: Promise<void>; release: () => void } {
+    const desired: Desired = options?.oddLot ? { contract, type, odd: true } : { contract, type };
+    const afterSerial = readinessSerial(desired);
+    const releaseHold = retainQuote(contract, type, options);
+    const pending = waitUntilReady(desired, afterSerial);
+    let released = false;
+    const release = () => {
+        if (released) return;
+        released = true;
+        options?.signal?.removeEventListener('abort', release);
+        pending.cancel(abortedReadiness());
+        releaseHold();
+    };
+    if (options?.signal?.aborted) release();
+    else options?.signal?.addEventListener('abort', release, { once: true });
+    const cleanupSignal = () => options?.signal?.removeEventListener('abort', release);
+    void pending.ready.then(cleanupSignal, cleanupSignal);
+    return { ready: pending.ready, release };
 }
 /** Like retainQuote, but kept when this page goes away (main window only;
  * for the background engine's watched contracts). */
@@ -192,8 +358,16 @@ export function retainContractQuotes(contract: ContractBase, options?: RetainOpt
     return () => releases.forEach(release => release());
 }
 function dispose() {
+    disposed = true;
+    ackGeneration++;
+    for (const cancel of readinessCancels) cancel(abortedReadiness());
+    remoteReadiness.clear();
+    ackEpochs.clear();
+    ackAttempts.clear();
+    confirming.clear();
     stopStatus();
     stopOwner();
+    stopContract();
     clearTimeout(sweepTimer);
     // 釘住的留給背景引擎，不算孤兒
     for (const key of pinned.keys()) ledger.delete(key);
