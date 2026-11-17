@@ -64,7 +64,7 @@ vi.mock('../lib/live-candle-history', () => ({ loadLiveCandleTail: (...args: unk
 vi.mock('lightweight-charts', async () => (await import('./chart-session.test-harness')).lwMock());
 
 import { CandleChart } from './candle-chart';
-import { ensureStream, subscribeQuoteStore } from '../lib/stream';
+import { ensureStream, streamConnectionEpoch, subscribeQuoteStore } from '../lib/stream';
 
 const stock = { code: '2330', security_type: 'STK', exchange: 'TSE', target_code: null, tick: 1 } as any;
 const future = { code: 'TXFR1', security_type: 'FUT', exchange: 'TAIFEX', target_code: 'TXFJ6', tick: 1 } as any;
@@ -560,6 +560,57 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(candles().setData.mock.calls.length).toBe(sets);
         expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 109, low: 1, close: 109 });
         expect(volumeAt('2026-10-08T09:01:00')).toBe(1006);
+    });
+
+    it.each(['1m', '1D'])('reconfirms subscription and rebuilds %s after maintenance without an SSE epoch change', async (interval) => {
+        setNow('2026-10-08T09:01:05');
+        const baseline = { ...kbars([['2026-10-08T09:00:00', '2026-10-08T09:01:00', () => 100]]), Volume: [3], Amount: [300] };
+        const ack = deferred<{ success: boolean }>();
+        const prefix = deferred<LiveCandlePrint[]>();
+        m.history.mockResolvedValueOnce(baseline).mockResolvedValueOnce(baseline);
+        m.subscribe.mockResolvedValueOnce({ success: true }).mockReturnValueOnce(ack.promise);
+        m.tail.mockResolvedValueOnce([]).mockReturnValueOnce(prefix.promise);
+        const renderer = mount({ interval });
+        await settle();
+        setNow('2026-10-08T09:01:10');
+        act(() => tick('09:01:10.000001', 101, 4));
+        await draw();
+        const target = interval === '1m' ? '2026-10-08T09:02:00' : '2026-10-08T00:00:00';
+        expect(volumeAt(target)).toBe(interval === '1m' ? 4 : 7);
+        const epoch = streamConnectionEpoch();
+        setNow('2026-10-08T09:01:20');
+        act(() => wire('contract_event', {
+            event_id: 'fixture-contract-maintenance', action: 'MAINTENANCE', region: 'TW', security_type: null,
+            published_at: '2026-10-08T09:01:20+08:00', base_changed: true, info_changed: true, info_scope: 'ALL', info_shards: [],
+        }));
+        await settle();
+        expect(streamConnectionEpoch()).toBe(epoch);
+        expect(m.history).toHaveBeenCalledTimes(2);
+        expect(m.subscribe).toHaveBeenCalledTimes(2);
+        expect(m.tail).toHaveBeenCalledTimes(1);
+        expect(candles().last).toEqual([]);
+        expect(histogram().last).toEqual([]);
+        // A trade in the maintenance/subscription window is available only in REST.
+        setNow('2026-10-08T09:01:29');
+        ack.resolve({ success: true });
+        await settle();
+        expect(m.tail).toHaveBeenCalledTimes(2);
+        setNow('2026-10-08T09:01:30');
+        act(() => tick('09:01:30.000003', 110, 7));
+        prefix.resolve([
+            { datetime: '2026-10-08T09:01:10.000001', close: 101, volume: 4, tickType: 1 },
+            { datetime: '2026-10-08T09:01:25.000002', close: 80, volume: 5, tickType: 1 },
+            { datetime: '2026-10-08T09:01:30.000003', close: 110, volume: 7, tickType: 1 },
+        ]);
+        await settle();
+        await draw();
+        expect(streamConnectionEpoch()).toBe(epoch);
+        expect(candleAt(target)).toMatchObject({ open: interval === '1m' ? 101 : 100, high: 110, low: 80, close: 110 });
+        expect(volumeAt(target)).toBe(interval === '1m' ? 16 : 19);
+        expect((histogram().last as any[]).reduce((sum, bar) => sum + bar.value, 0)).toBe(19);
+        expect(readout(renderer, 'low')).toBe('低80.0');
+        expect(readout(renderer, 'volume')).toBe(interval === '1m' ? '量16' : '量19');
+        expect(renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete')).toHaveLength(0);
     });
 
     it('aggregates index prices through the raw quote_idx stream with zero trade volume', async () => {

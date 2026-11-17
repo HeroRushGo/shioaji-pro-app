@@ -62,7 +62,7 @@ import {
     useDrawingsSaveFailed,
 } from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
-import { getQuote, getStreamStatus, onAnyIndexQuote, onAnyTick, streamConnectionEpoch, subscribeStatusStore } from '../lib/stream';
+import { getQuote, getStreamStatus, onAnyIndexQuote, onAnyTick, onContractEvent, streamConnectionEpoch, subscribeStatusStore } from '../lib/stream';
 import { retainQuoteWithReady } from '../lib/quote-ownership';
 import { canonicalCandleTime, LiveCandleAccumulator, type LiveCandlePrint } from '../lib/live-candles';
 import { loadLiveCandleTail } from '../lib/live-candle-history';
@@ -1125,6 +1125,18 @@ export function CandleChart({
                 setHistorySeq(nextChartHistoryRevision());
             }
         });
+        const offMaintenance = onContractEvent((event) => {
+            if (cancelled || event.action !== 'MAINTENANCE') return;
+            // Maintenance can drop broker subscriptions without closing SSE.
+            // The gap's bars are untrusted even if LIVE never changed. Clear
+            // this view before fresh history/ACK/tail; a failed reload must not
+            // later certify an old gap bar as complete.
+            continuityBroken = true;
+            loadedKeyRef.current = '';
+            drawnKeyRef.current = '';
+            setLiveTailError(true);
+            setHistorySeq(nextChartHistoryRevision());
+        });
 
         // ---- older-history paging (TradingView-style infinite scroll) ----
         let oldestDay: number = tf.days; // days-ago covered so far
@@ -1266,6 +1278,7 @@ export function CandleChart({
             offTick();
             offIndex();
             offStatus();
+            offMaintenance();
             readinessController.abort();
             quoteHold.release();
             if (drawTimer !== undefined) clearTimeout(drawTimer);
