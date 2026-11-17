@@ -80,6 +80,7 @@ const oddQuoteListeners = new Map<string, Set<Listener>>();
 const statusListeners = new Set<Listener>();
 const orderEventListeners = new Set<(ev: OrderEventReport) => void>();
 const tickTapeListeners = new Set<(tick: SseTick) => void>();
+const indexQuoteListeners = new Set<(quote: SseIndexQuote) => void>();
 const bidAskListeners = new Set<(bidask: SseBidAsk) => void>();
 const oddTickListeners = new Set<(tick: SseTick) => void>();
 const contractEventListeners = new Set<
@@ -332,6 +333,7 @@ function handleIndexQuote(raw: string) {
     });
     emitQuote(index.code);
     rememberIndexClose(index);
+    indexQuoteListeners.forEach((listener) => listener(index));
 }
 
 // registry of every quote subscription made this session — replayed after
@@ -921,6 +923,12 @@ export function onAnyTick(listener: (tick: SseTick) => void) {
     return () => {
         tickTapeListeners.delete(listener);
     };
+}
+
+/** Every normalized index observation, before React quote notification batching. */
+export function onAnyIndexQuote(listener: (quote: SseIndexQuote) => void) {
+    indexQuoteListeners.add(listener);
+    return () => { indexQuoteListeners.delete(listener); };
 }
 
 /** Every regular-lot best bid / ask update (#226 對手價 triggers). */

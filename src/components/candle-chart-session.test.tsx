@@ -17,6 +17,14 @@ vi.mock('lightweight-charts', async () => (await import('./chart-session.test-ha
 
 let quote: any = undefined;
 const listeners = new Set<() => void>();
+const rawTicks = new Set<(tick: any) => void>();
+vi.mock('../lib/stream', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../lib/stream')>(),
+    getQuote: () => quote,
+    onAnyTick: (listener: (tick: any) => void) => { rawTicks.add(listener); return () => rawTicks.delete(listener); },
+    onAnyIndexQuote: () => () => {},
+}));
+vi.mock('../lib/live-candle-history', () => ({ loadLiveCandleTail: async () => [] }));
 vi.mock('../hooks/use-stream', async () => {
     const React = await import('react');
     return {
@@ -44,10 +52,14 @@ const stk = { code: '2330', security_type: 'STK', exchange: 'TSE', target_code: 
 
 function pushTick(date: string, time: string, close: number, code = 'TXFR1') {
     quote = { tick: { code, date, time, close, volume: 3 }, seq: Math.random(), lastDir: 0, flashSeq: 0 };
-    act(() => listeners.forEach((l) => l()));
+    act(() => {
+        rawTicks.forEach((listener) => listener(quote.tick));
+        listeners.forEach((listener) => listener());
+    });
 }
 const flush = async () => {
     for (let i = 0; i < 6; i++) await act(async () => {});
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 55)); });
 };
 const mounted: ReactTestRenderer[] = [];
 function mount(props: any) {
@@ -103,6 +115,7 @@ beforeEach(() => {
 afterEach(() => {
     for (const m of mounted.splice(0)) act(() => m.unmount());
     listeners.clear();
+    rawTicks.clear();
     vi.useRealTimers();
     vi.unstubAllGlobals();
 });

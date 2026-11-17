@@ -62,6 +62,9 @@ import {
     useDrawingsSaveFailed,
 } from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
+import { getQuote, getStreamStatus, onAnyIndexQuote, onAnyTick, streamConnectionEpoch, subscribeStatusStore } from '../lib/stream';
+import { canonicalCandleTime, LiveCandleAccumulator, type LiveCandlePrint } from '../lib/live-candles';
+import { loadLiveCandleTail } from '../lib/live-candle-history';
 import {
     colorWithOpacity,
     DEF_BY_TYPE,
@@ -151,6 +154,7 @@ import {
     aggregate,
     dateStrOffset,
     kbarsToCandles,
+    nowWallClockUtc,
     wallClockToUtc
 } from '../lib/utils/kbars';
 import { roundToTick, tickDecimals, tickSizeFor } from '../lib/utils/ticksize';
@@ -293,6 +297,7 @@ export function CandleChart({
     const [empty, setEmpty] = useState(false);
     const [loading, setLoading] = useState(false);
     const [historyError, setHistoryError] = useState(false);
+    const [liveTailError, setLiveTailError] = useState(false);
     // 歷史斷層自癒（issue #18）：開盤前抓的歷史可能缺少上游尚未發布的
     // 跨午夜夜盤段，live 進來出現大斷層時補抓一次
     const [historySeq, setHistorySeq] = useState(0);
@@ -329,6 +334,8 @@ export function CandleChart({
         return () => window.removeEventListener('keydown', onKey, true);
     }, []);
     const colors = getChartColors(themeSettings);
+    const liveColorsRef = useRef(colors);
+    liveColorsRef.current = colors;
     const themeKey = themeKeyOf(themeSettings);
     const [mode, setMode] = useState<TradeMode>('observe');
     // 圖表下單設定（#204）：每張圖自己一組（每市場一份），缺省取「設為預設」
@@ -921,7 +928,93 @@ export function CandleChart({
     useEffect(() => {
         let cancelled = false;
         const loadKey = `${contract.code}|${tf.minutes}|${dayOnly}`;
+        const frozenMinute = Math.floor(nowWallClockUtc() / 60) * 60;
+        const requestRevision = `${historySeq}:${frozenMinute}`;
+        const seedTick = getQuote(contract.code)?.tick;
+        const acceptTime = dayOnly
+            ? (time: number) => isDaySessionTick(contract.security_type, time)
+            : undefined;
+        let live = new LiveCandleAccumulator(tf.minutes, acceptTime);
+        let drawTimer: ReturnType<typeof setTimeout> | undefined;
+        let reloadGap = false;
+        let recovering = false;
+        let continuityBroken = false;
+        let observedEpoch = streamConnectionEpoch();
+        let sawLive = getStreamStatus() === 'live';
+        let closedHistory: Candle[] = drawnKeyRef.current === loadKey ? barsRef.current : [];
         loadedKeyRef.current = ''; // freeze tick updates while loading
+        setLiveTailError(false);
+
+        const drawLive = () => {
+            drawTimer = undefined;
+            if (cancelled || continuityBroken || loadedKeyRef.current !== loadKey) return;
+            const changes = live.takeChanges();
+            if (changes.bars.length || changes.reset) {
+                barsRef.current = live.bars;
+                lastBarRef.current = live.last;
+                if (changes.reset) applyBars(live.bars);
+                else {
+                    try {
+                        const palette = liveColorsRef.current;
+                        for (const bar of changes.bars) {
+                            candleSeriesRef.current?.update({
+                                time: bar.time as UTCTimestamp,
+                                open: bar.open, high: bar.high, low: bar.low, close: bar.close,
+                            });
+                            volSeriesRef.current?.update({
+                                time: bar.time as UTCTimestamp, value: bar.volume,
+                                color: bar.close >= bar.open ? palette.upVol : palette.downVol,
+                            });
+                        }
+                        if (changes.appended) setDataVersion((v) => v + 1);
+                    } catch {
+                        // A full ordered snapshot also repairs a chart whose tail
+                        // changed while a late edit was waiting to be published.
+                        applyBars(live.bars);
+                    }
+                }
+                ohlcStore.bump();
+                setEmpty(live.bars.length === 0);
+                if (recovering && changes.appended) {
+                    recovering = false;
+                    setLiveTailError(false);
+                    setHistoryError(false);
+                }
+            }
+            if (reloadGap) {
+                reloadGap = false;
+                setHistorySeq(nextChartHistoryRevision());
+            }
+        };
+        const scheduleDraw = () => {
+            if (drawTimer === undefined) drawTimer = setTimeout(drawLive, 50);
+        };
+        const receive = (print: LiveCandlePrint) => {
+            if (cancelled || continuityBroken) return;
+            const canonical = canonicalCandleTime(print.datetime);
+            if (!canonical || print.simtrade || !Number.isFinite(print.close) || print.close <= 0) return;
+            const time = wallClockToUtc(canonical);
+            if (acceptTime && !acceptTime(time)) return;
+            const sec = tf.minutes * 60;
+            const bucket = tf.minutes >= 1440 ? Math.floor(time / 86400) * 86400 : Math.floor(time / sec) * sec + sec;
+            if (!recovering && loadedKeyRef.current === loadKey && live.last && bucket - live.last.time > sec * 3 && Date.now() - gapReloadAtRef.current > 120_000) {
+                gapReloadAtRef.current = Date.now();
+                reloadGap = true;
+            }
+            live.push(print); // lossless arithmetic; never notify React per print
+            if (loadedKeyRef.current === loadKey) scheduleDraw();
+        };
+        const offTick = onAnyTick((tick) => {
+            if (tick.code === contract.code) receive({
+                datetime: `${tick.date}T${tick.time}`, close: Number(tick.close), volume: tick.volume,
+                tickType: tick.tick_type, simtrade: tick.simtrade,
+            });
+        });
+        const offIndex = onAnyIndexQuote((index) => {
+            if (contract.security_type === 'IND' && index.code === contract.code) receive({
+                datetime: `${index.date}T${index.time}`, close: Number(index.close), volume: 0,
+            });
+        });
         const toRaw = (k: Parameters<typeof kbarsToCandles>[0]) => {
             const raw = kbarsToCandles(k);
             return dayOnly
@@ -945,18 +1038,8 @@ export function CandleChart({
         setEmpty(false);
         setLoading(true);
         setHistoryError(false);
-        const clearSeries = () => {
-            // the series must never keep a stale timeframe's data — a later
-            // tick bucketed for the new timeframe would be "older" than the
-            // stale tail and crash the chart library
-            candleSeriesRef.current?.setData([]);
-            volSeriesRef.current?.setData([]);
-            barsRef.current = [];
-            rawRef.current = [];
-            setDataVersion((v) => v + 1);
-            loadedKeyRef.current = loadKey; // live bars may build from here
-        };
         const applyBars = (bars: Candle[]) => {
+            const palette = liveColorsRef.current;
             candleSeriesRef.current?.setData(
                 bars.map((b) => ({
                     time: b.time as UTCTimestamp,
@@ -970,19 +1053,56 @@ export function CandleChart({
                 bars.map((b) => ({
                     time: b.time as UTCTimestamp,
                     value: b.volume,
-                    color: b.close >= b.open ? colors.upVol : colors.downVol,
+                    color: b.close >= b.open ? palette.upVol : palette.downVol,
                 })),
             );
             barsRef.current = bars;
+            lastBarRef.current = bars.at(-1) ?? null;
             setDataVersion((v) => v + 1);
         };
+        const failTail = () => {
+            // Only a future, fully observed bucket can restore continuity if
+            // the REST prefix/queue cannot establish a complete current bar.
+            const now = nowWallClockUtc();
+            const sec = tf.minutes * 60;
+            const from = tf.minutes >= 1440 ? Math.floor(now / 86400) * 86400 + 86400 : Math.floor(now / sec) * sec + sec;
+            const completed = closedHistory.filter((bar) => bar.time < (tf.minutes >= 1440 ? from - 86400 : from));
+            live = new LiveCandleAccumulator(tf.minutes, acceptTime);
+            live.seed(completed, from, []);
+            live.takeChanges();
+            applyBars(live.bars);
+            loadedKeyRef.current = loadKey;
+            recovering = true;
+            setLiveTailError(true);
+            setEmpty(completed.length === 0);
+            ohlcStore.bump();
+        };
+        // An open EventSource is not continuity proof. Invalidate the current
+        // generation on down/stale, then reconcile a fresh prefix on reconnect.
+        const offStatus = subscribeStatusStore(() => {
+            const next = getStreamStatus();
+            const epoch = streamConnectionEpoch();
+            if (next !== 'live') {
+                if (sawLive && !continuityBroken) {
+                    continuityBroken = true;
+                    if (loadedKeyRef.current === loadKey) closedHistory = live.bars;
+                    failTail();
+                    loadedKeyRef.current = '';
+                }
+            } else if (epoch !== observedEpoch) {
+                observedEpoch = epoch;
+                sawLive = true;
+                continuityBroken = true;
+                setHistorySeq(nextChartHistoryRevision());
+            }
+        });
 
         // ---- older-history paging (TradingView-style infinite scroll) ----
         let oldestDay: number = tf.days; // days-ago covered so far
         let fetching = false;
         let dryPages = 0; // consecutive empty pages → assume exhausted
         const loadMore = () => {
-            if (fetching || cancelled) return;
+            if (fetching || cancelled || continuityBroken) return;
             if (loadedKeyRef.current !== loadKey) return;
             if (dryPages >= 3 || oldestDay >= MAX_HISTORY_DAYS) return;
             fetching = true;
@@ -996,7 +1116,7 @@ export function CandleChart({
                 { timeoutMs: 30_000 },
             )
                 .then((k) => {
-                    if (cancelled || loadedKeyRef.current !== loadKey) return;
+                    if (cancelled || continuityBroken || loadedKeyRef.current !== loadKey) return;
                     oldestDay = from;
                     const boundary = rawRef.current[0]?.time ?? Infinity;
                     const older = toRaw(k).filter(
@@ -1008,19 +1128,10 @@ export function CandleChart({
                     }
                     dryPages = 0;
                     rawRef.current = [...older, ...rawRef.current];
-                    const bars = aggregate(rawRef.current, tf.minutes);
-                    // re-attach the live tail built from ticks since load —
-                    // raw history doesn't contain those bars
-                    const existing = barsRef.current;
-                    const lastAgg =
-                        bars.length > 0
-                            ? bars[bars.length - 1]!.time
-                            : -Infinity;
-                    for (const b of existing) {
-                        if (b.time === lastAgg) bars[bars.length - 1] = b;
-                        else if (b.time > lastAgg) bars.push(b);
-                    }
-                    applyBars(bars);
+                    live.prepend(aggregate(rawRef.current, tf.minutes));
+                    applyBars(live.bars);
+                    live.takeChanges();
+                    ohlcStore.bump();
                 })
                 .catch(() => {
                     dryPages += 1;
@@ -1031,24 +1142,44 @@ export function CandleChart({
         };
 
         fetchChartHistory(contract, dateStrOffset(tf.days), dateStrOffset(0), {
-            revision: historySeq,
+            revision: requestRevision,
             timeoutMs: 30_000, // 大週期初載可達數十天，不能用 10s
         })
-            .then((k) => {
-                if (cancelled || !candleSeriesRef.current) return;
-                const raw = toRaw(k);
+            .then(async (k) => {
+                if (cancelled || continuityBroken || !candleSeriesRef.current) return;
+                const allRaw = toRaw(k);
+                const isIndex = contract.security_type === 'IND';
+                // A kbar response may include the open minute. Trades need an
+                // exact raw prefix; a partial minute has no snapshot watermark.
+                const raw = allRaw.filter((bar) => bar.time <= frozenMinute);
                 const bars = aggregate(raw, tf.minutes);
-                if (bars.length === 0) {
-                    clearSeries();
-                    setEmpty(true);
-                    loadMoreRef.current = loadMore; // history may still exist
+                closedHistory = bars;
+                rawRef.current = raw;
+                // Index KBars have no observation watermark or raw trade-tail
+                // endpoint. Keep closed bars until a fully observed target
+                // bucket begins; older quotes must not roll the close back.
+                if (isIndex) {
+                    failTail();
+                    loadMoreRef.current = loadMore;
                     return;
                 }
-                rawRef.current = raw;
-                applyBars(bars);
-                lastBarRef.current = bars[bars.length - 1] ?? null;
+                const sec = tf.minutes * 60;
+                const fallbackFrom = tf.minutes >= 1440 ? Math.floor(frozenMinute / 86400) * 86400 : Math.floor(frozenMinute / sec) * sec;
+                const from = raw.at(-1)?.time ?? fallbackFrom;
+                const prefix = await loadLiveCandleTail(contract, from, requestRevision);
+                if (cancelled || continuityBroken || !candleSeriesRef.current) return;
+                if (prefix.length === 0 && seedTick && !seedTick.simtrade && seedTick.volume > 0) {
+                    const time = canonicalCandleTime(`${seedTick.date}T${seedTick.time}`);
+                    if (time && wallClockToUtc(time) >= from) throw new Error('Live trade prefix unavailable');
+                }
+                live.seed(bars, from, prefix);
+                applyBars(live.bars);
+                live.takeChanges();
                 loadedKeyRef.current = loadKey;
                 loadMoreRef.current = loadMore;
+                setEmpty(live.bars.length === 0);
+                setHistoryError(false);
+                ohlcStore.bump();
                 chartRef.current?.timeScale().scrollToRealTime();
                 // a manual price-axis drag disables autoScale and pins the
                 // range; without re-enabling it the prior symbol's price band
@@ -1059,113 +1190,30 @@ export function CandleChart({
                     .applyOptions({ autoScale: true });
             })
             .catch(() => {
-                if (cancelled) return;
-                // 保留即時作畫；歷史查詢失敗後由使用者手動更新。
-                clearSeries();
-                setEmpty(true);
+                if (cancelled || continuityBroken) return;
+                failTail();
+                loadMoreRef.current = loadMore;
                 setHistoryError(true);
             })
             .finally(() => {
-                if (!cancelled) setLoading(false);
+                if (!cancelled && !continuityBroken) setLoading(false);
             });
         return () => {
             cancelled = true;
+            offTick();
+            offIndex();
+            offStatus();
+            if (drawTimer !== undefined) clearTimeout(drawTimer);
         };
     }, [contract, tf, historySeq, dayOnly]);
 
-    // Live trade/index quote -> update the current bar. Index products use
-    // quote_idx rather than the regular tick stream in Shioaji 1.7.
+    // Quote snapshots still own subscriptions/latest-price UI. Candle arithmetic
+    // consumes the independent lossless raw observers above, never this snapshot.
     const liveQuote = quote?.tick ?? quote?.index;
     if (liveQuote && liveQuote.code === contract.code) {
         const p = Number(liveQuote.close);
         if (Number.isFinite(p)) lastPriceRef.current = p;
     }
-    useEffect(() => {
-        if (!liveQuote || liveQuote.code !== contract.code) return;
-        // 試撮 (simtrade) 揭示價可以是漲跌停天地價 — 畫進 K 棒會把
-        // Y 軸尺度撐爆（issue #5），一律排除
-        if ('simtrade' in liveQuote && liveQuote.simtrade) return;
-        // history for this (symbol, timeframe) not in place yet
-        if (
-            loadedKeyRef.current !== `${contract.code}|${tf.minutes}|${dayOnly}`
-        ) {
-            return;
-        }
-        const series = candleSeriesRef.current;
-        if (!series) return;
-        const price = Number(liveQuote.close);
-        if (!Number.isFinite(price)) return;
-        const tickTime = wallClockToUtc(
-            `${liveQuote.date}T${liveQuote.time}`,
-        );
-        // 僅日盤：夜盤/盤外成交不入圖（與歷史濾法同一套 label 判斷）
-        if (dayOnly && !isDaySessionTick(contract.security_type, tickTime)) {
-            return;
-        }
-        const bucketSec = tf.minutes * 60;
-        // close-label-right（與 aggregate/1 分 K 歷史同慣例）：成交 τ 屬
-        // 於哪個「收盤 label」桶 — floor 會把 live 桶標早一格，1 分 K
-        // 時甚至會併進前一分鐘的歷史 bar
-        const bucket =
-            tf.minutes >= 1440
-                ? Math.floor(tickTime / 86400) * 86400
-                : Math.floor(tickTime / bucketSec) * bucketSec + bucketSec;
-        let bar = lastBarRef.current;
-        // live 桶與歷史尾端出現 3 個桶以上的斷層（換時段/上游資料晚發布）
-        // → 排程一次歷史補抓把洞補起來；live 桶照常先畫，補抓完成後
-        // 整段重建。120s 節流避免上游持續缺料時反覆打
-        if (
-            bar &&
-            bucket - bar.time > bucketSec * 3 &&
-            Date.now() - gapReloadAtRef.current > 120_000
-        ) {
-            gapReloadAtRef.current = Date.now();
-            setHistorySeq(nextChartHistoryRevision());
-        }
-        if (!bar || bucket > bar.time) {
-            bar = {
-                time: bucket,
-                open: price,
-                high: price,
-                low: price,
-                close: price,
-                volume: quote?.tick?.volume ?? 0,
-            };
-            // a fresh bucket = the previous bar closed — keep barsRef in
-            // sync (history paging re-attaches this tail) and recompute
-            // indicators once per bar close
-            barsRef.current.push(bar);
-            setDataVersion((v) => v + 1);
-        } else {
-            bar.high = Math.max(bar.high, price);
-            bar.low = Math.min(bar.low, price);
-            bar.close = price;
-            bar.volume += quote?.tick?.volume ?? 0;
-        }
-        lastBarRef.current = bar;
-        try {
-            series.update({
-                time: bar.time as UTCTimestamp,
-                open: bar.open,
-                high: bar.high,
-                low: bar.low,
-                close: bar.close,
-            });
-            volSeriesRef.current?.update({
-                time: bar.time as UTCTimestamp,
-                value: bar.volume,
-                color: bar.close >= bar.open ? colors.upVol : colors.downVol,
-            });
-        } catch {
-            // a rejected update (e.g. timestamp older than the series tail)
-            // must never take the app down — history reload will resync
-        }
-        ohlcStore.bump(); // K 棒讀值跟著最新成交
-        // 歷史載入失敗後 live bar 已開始堆 — 圖上有東西就不該再掛
-        // 「無 K 線資料」（同值 setState React 會 bail out）
-        setEmpty(false);
-        setHistoryError(false);
-    }, [liveQuote, quote?.tick?.volume, contract.code, tf.minutes, dayOnly]);
 
     // 自訂指標增刪改 → 重算指標 effect；被刪掉的型別把殘留實例一併清掉
     const [customVer, setCustomVer] = useState(0);
@@ -2370,12 +2418,16 @@ export function CandleChart({
                             className={panel.mono} />
                     </div>
                 )}
-                {(showOhlc ||
+                {(liveTailError ||
+                    showOhlc ||
                     modeHintEl ||
                     workingOrders.length > 0 ||
                     triggers.length > 0 ||
                     instances.length > 0) && (
                     <div className={styles.triggerList}>
+                        {liveTailError && <div data-live-candle-status='incomplete'>
+                            <AsyncStatus phase='error' text='即時 K 線未完整；等待下一根完整 K 棒，或更新歷史重試' className={panel.mono} />
+                        </div>}
                         {showOhlc && (
                             <OhlcLegend
                                 store={ohlcStore}
