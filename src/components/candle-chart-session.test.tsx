@@ -39,6 +39,10 @@ vi.mock('../hooks/use-stream', async () => {
     };
 });
 const fetchMock = vi.fn();
+vi.mock('../lib/quote-ownership', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../lib/quote-ownership')>(),
+    retainQuoteWithReady: () => ({ ready: Promise.resolve(), release: () => {} }),
+}));
 vi.mock('../lib/chart-history', () => ({
     fetchChartHistory: (...a: unknown[]) => fetchMock(...a),
     nextChartHistoryRevision: () => Math.random(),

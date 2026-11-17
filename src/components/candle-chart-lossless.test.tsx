@@ -21,10 +21,12 @@ const m = vi.hoisted(() => {
         indices: new Set<(quote: SseIndexQuote) => void>(),
         history: vi.fn(),
         tail: vi.fn(),
+        subscribe: vi.fn(),
+        unsubscribe: vi.fn(),
     };
 });
 vi.mock('../lib/trade', () => ({ notify: () => {}, placeQuickOrder: async () => {} }));
-vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: async () => {} }));
+vi.mock('../lib/shioaji', () => ({ cancelOrder: async () => {}, updateOrderPrice: async () => {}, subscribeQuote: m.subscribe, unsubscribeQuote: m.unsubscribe }));
 vi.mock('../lib/runtime', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/runtime')>(), getApiBase: () => 'http://fixture.invalid', getStreamBase: () => 'http://fixture.invalid' }));
 vi.mock('../lib/api', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/api')>(), apiPost: vi.fn(async () => ({ success: true })) }));
 vi.mock('../lib/server-info-store', async (importOriginal) => ({ ...await importOriginal<typeof import('../lib/server-info-store')>(), forgetServerInfo: vi.fn(), knownServerInfo: () => undefined }));
@@ -115,13 +117,17 @@ beforeEach(() => {
     m.revision = 0;
     m.history.mockReset().mockImplementation(async () => initial());
     m.tail.mockReset().mockResolvedValue([]);
+    m.subscribe.mockReset().mockResolvedValue({ success: true });
+    m.unsubscribe.mockReset().mockResolvedValue({ success: true });
     ensureStream(); // follower fixture: feeds the same wire handler as a real shared SSE.
+    act(() => m.options!.onWire({ kind: 'status', status: 'live', heartbeat: Date.now() }));
 });
 afterEach(async () => {
     for (const renderer of mounted) act(() => renderer.unmount());
     mounted.clear();
-    // Flush quote-store notifications too, so its module-level coalescer is idle.
-    await draw();
+    // Drain the real ownership queue's 1500ms release grace before clearing timers.
+    // This also flushes the quote store's 50ms coalescer between test symbols.
+    await draw(1600);
     expect(m.ticks.size).toBe(0);
     expect(m.indices.size).toBe(0);
     vi.clearAllTimers();
@@ -176,6 +182,58 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(volumeAt('2026-10-08T09:02:00')).toBe(8);
         expect(candleAt('2026-10-08T09:03:00')).toMatchObject({ open: 110, high: 110, low: 110, close: 110 });
         expect(volumeAt('2026-10-08T09:03:00')).toBe(7);
+    });
+
+    it('fetches the final REST prefix only after subscription ACK and reconciles its missed window with raw prints', async () => {
+        const ack = deferred<{ success: boolean }>();
+        const prefix = deferred<LiveCandlePrint[]>();
+        m.subscribe.mockReturnValueOnce(ack.promise);
+        m.tail.mockReturnValueOnce(prefix.promise);
+        const renderer = mount();
+        await settle();
+        expect(m.subscribe).toHaveBeenCalledTimes(1);
+        expect(m.history).toHaveBeenCalledTimes(1);
+        expect(m.ticks.size).toBe(1);
+        expect(m.tail).not.toHaveBeenCalled();
+        expect(candleAt('2026-10-08T09:01:00')).toBeUndefined();
+        // The low happened before subscription ACK, so only REST can recover it.
+        setNow('2026-10-08T09:00:40');
+        ack.resolve({ success: true });
+        await settle();
+        expect(m.tail).toHaveBeenCalledTimes(1);
+        setNow('2026-10-08T09:00:41');
+        act(() => tick('09:00:41.000002', 110, 7));
+        prefix.resolve([
+            { datetime: '2026-10-08T09:00:35.000001', close: 80, volume: 5, tickType: 1 },
+            { datetime: '2026-10-08T09:00:41.000002', close: 110, volume: 7, tickType: 1 },
+        ]);
+        await settle();
+        await draw();
+        expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 80, high: 110, low: 80, close: 110 });
+        expect(volumeAt('2026-10-08T09:01:00')).toBe(12);
+        expect(readout(renderer, 'volume')).toBe('量12');
+        expect(renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete')).toHaveLength(0);
+    });
+
+    it('keeps subscription ACK failures incomplete even when later raw prints cross full bucket boundaries', async () => {
+        m.subscribe.mockRejectedValueOnce(new Error('fixture subscription rejected'));
+        const renderer = mount();
+        await settle();
+        await draw();
+        expect(m.subscribe).toHaveBeenCalledTimes(1);
+        expect(m.tail).not.toHaveBeenCalled();
+        const incomplete = () => renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete');
+        expect(incomplete()).toHaveLength(1);
+        setNow('2026-10-08T09:01:00');
+        act(() => tick('09:01:00.000001', 100, 5));
+        await draw();
+        setNow('2026-10-08T09:02:00');
+        act(() => tick('09:02:00.000001', 110, 7));
+        await draw();
+        expect(candleAt('2026-10-08T09:02:00')).toBeUndefined();
+        expect(candleAt('2026-10-08T09:03:00')).toBeUndefined();
+        expect(incomplete()).toHaveLength(1);
+        expect(m.tail).not.toHaveBeenCalled();
     });
 
     it('reconciles a delayed history plus REST prefix with microsecond and multiset overlap exactly once', async () => {
@@ -522,4 +580,40 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(volumeAt('2026-10-08T09:02:00')).toBe(0);
         expect(m.tail).not.toHaveBeenCalled();
     });
+    it('retains a completed zero-volume index bar but removes its open successor on disconnect', async () => {
+        const index = { code: 'IX0002', security_type: 'IND', exchange: 'TSE', target_code: null };
+        const observe = (time: string, close: number) => wire('quote_idx', {
+            Code: index.code, Exchange: 'TSE', Date: '2026/10/08', Time: time,
+            Open: '100', High: String(close), Low: '100', Close: String(close), Reference: '100',
+        });
+        act(() => m.options!.onWire({ kind: 'status', status: 'live', heartbeat: Date.now() }));
+        const renderer = mount({ contract: index });
+        await settle();
+        setNow('2026-10-08T09:01:00');
+        act(() => {
+            observe('09:01:00.000001', 100);
+            observe('09:01:59.999999', 110);
+        });
+        await draw();
+        setNow('2026-10-08T09:02:20');
+        act(() => {
+            observe('09:02:00.000001', 120);
+            observe('09:02:20.000001', 125);
+        });
+        await draw();
+        expect(candleAt('2026-10-08T09:02:00')).toMatchObject({ open: 100, high: 110, low: 100, close: 110 });
+        expect(volumeAt('2026-10-08T09:02:00')).toBe(0);
+        expect(candleAt('2026-10-08T09:03:00')).toMatchObject({ open: 120, high: 125, low: 120, close: 125 });
+        setNow('2026-10-08T09:02:30');
+        act(() => m.options!.onWire({ kind: 'status', status: 'down', heartbeat: Date.now() }));
+        await settle();
+        await draw();
+        expect(candleAt('2026-10-08T09:02:00')).toMatchObject({ open: 100, high: 110, low: 100, close: 110 });
+        expect(volumeAt('2026-10-08T09:02:00')).toBe(0);
+        expect(candleAt('2026-10-08T09:03:00')).toBeUndefined();
+        expect(volumeAt('2026-10-08T09:03:00')).toBeUndefined();
+        expect(renderer.root.findAll((node) => typeof node.type === 'string' && node.props['data-live-candle-status'] === 'incomplete')).toHaveLength(1);
+        expect(m.tail).not.toHaveBeenCalled();
+    });
+
 });

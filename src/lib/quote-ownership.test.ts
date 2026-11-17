@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), unsubscribe: vi.fn(), status: 'live', changed: undefined as (() => void) | undefined, owner: false, ownerChanged: undefined as (() => void) | undefined }));
+const mocks = vi.hoisted(() => ({ subscribe: vi.fn(), unsubscribe: vi.fn(), status: 'live', epoch: 1, changed: undefined as (() => void) | undefined, owner: false, ownerChanged: undefined as (() => void) | undefined, contractChanged: undefined as ((event: { action: string }) => void) | undefined }));
 vi.mock('./runtime', () => ({ getApiBase: () => 'test-api' }));
 vi.mock('./shioaji', () => ({ subscribeQuote: mocks.subscribe, unsubscribeQuote: mocks.unsubscribe }));
-vi.mock('./stream', () => ({ getStreamStatus: () => mocks.status, subscribeStatusStore: (fn: () => void) => { mocks.changed = fn; return () => {}; }, isStreamOwner: () => mocks.owner, subscribeStreamOwner: (fn: () => void) => { mocks.ownerChanged = fn; return () => {}; } }));
+vi.mock('./stream', () => ({ getStreamStatus: () => mocks.status, streamConnectionEpoch: () => mocks.status === 'live' ? mocks.epoch : -1, subscribeStatusStore: (fn: () => void) => { mocks.changed = fn; return () => {}; }, isStreamOwner: () => mocks.owner, subscribeStreamOwner: (fn: () => void) => { mocks.ownerChanged = fn; return () => {}; }, onContractEvent: (fn: (event: { action: string }) => void) => { mocks.contractChanged = fn; return () => {}; } }));
 const contract = { code: '2330', security_type: 'STK' as const, exchange: 'TSE' as const, target_code: null };
 
 describe('quote ownership shared consumers', () => {
     beforeEach(() => {
         vi.resetModules(); vi.clearAllMocks(); vi.stubGlobal('BroadcastChannel', undefined);
-        mocks.status = 'live'; mocks.changed = undefined; mocks.owner = false; mocks.ownerChanged = undefined;
+        mocks.status = 'live'; mocks.epoch = 1; mocks.changed = undefined; mocks.owner = false; mocks.ownerChanged = undefined; mocks.contractChanged = undefined;
         mocks.subscribe.mockResolvedValue({ success: true }); mocks.unsubscribe.mockResolvedValue({ success: true });
     });
     afterEach(() => vi.unstubAllGlobals());
@@ -124,6 +124,228 @@ describe('quote ownership shared consumers', () => {
             await vi.advanceTimersByTimeAsync(0);
             expect(mocks.subscribe).toHaveBeenCalledTimes(2);
         } finally { vi.useRealTimers(); }
+    });
+    describe('broker subscription readiness', () => {
+        let pagehide: (() => void)[];
+        const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+        const deferred = () => {
+            let resolve!: (value: { success: boolean }) => void;
+            const promise = new Promise<{ success: boolean }>(res => { resolve = res; });
+            return { promise, resolve };
+        };
+        beforeEach(() => {
+            vi.useFakeTimers();
+            pagehide = [];
+            vi.stubGlobal('window', { addEventListener: (name: string, fn: () => void) => { if (name === 'pagehide') pagehide.push(fn); } });
+        });
+        afterEach(async () => {
+            for (const dispose of pagehide) dispose();
+            await vi.advanceTimersByTimeAsync(32_000);
+            vi.clearAllTimers();
+            vi.useRealTimers();
+        });
+
+        it('does not resolve before the delayed broker ACK already in the ownership queue', async () => {
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            let settled = false;
+            void held.ready.then(() => { settled = true; });
+            await flush();
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            expect(settled).toBe(false);
+            pending.resolve({ success: true });
+            await held.ready;
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            held.release();
+        });
+
+        it('rejects a failed broker ACK instead of declaring readiness or silently retrying', async () => {
+            mocks.subscribe.mockRejectedValueOnce(new Error('broker rejected'));
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            await expect(held.ready).rejects.toThrow('broker rejected');
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            held.release();
+        });
+
+        it('shares a successful same-epoch ACK among concurrent and later holders', async () => {
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const first = retainQuoteWithReady(contract, 'Tick');
+            const second = retainQuoteWithReady(contract, 'Tick');
+            await Promise.all([first.ready, second.ready]);
+            const third = retainQuoteWithReady(contract, 'Tick');
+            await third.ready;
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            first.release(); second.release(); third.release();
+        });
+
+        it('waits for LIVE and confirms again when an earlier ACK happened while connecting', async () => {
+            mocks.status = 'connecting';
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            let settled = false;
+            void held.ready.then(() => { settled = true; });
+            await flush();
+            expect(settled).toBe(false);
+            expect(mocks.subscribe).toHaveBeenCalledOnce(); // old retain behavior is preserved
+            mocks.status = 'live'; mocks.changed?.();
+            await held.ready;
+            expect(mocks.subscribe).toHaveBeenCalledTimes(2);
+            held.release();
+        });
+
+        it('requires a fresh ACK after reconnect despite the existing active refcount', async () => {
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const first = retainQuoteWithReady(contract, 'Tick');
+            await first.ready;
+            mocks.status = 'connecting'; mocks.changed?.();
+            mocks.epoch = 2; mocks.status = 'live'; mocks.changed?.();
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const next = retainQuoteWithReady(contract, 'Tick');
+            let settled = false;
+            void next.ready.then(() => { settled = true; });
+            await flush();
+            expect(mocks.subscribe).toHaveBeenCalledTimes(2);
+            expect(settled).toBe(false);
+            pending.resolve({ success: true });
+            await next.ready;
+            first.release(); next.release();
+        });
+
+        it('invalidates a same-epoch ACK on maintenance without changing old holder behavior', async () => {
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const first = retainQuoteWithReady(contract, 'Tick');
+            await first.ready;
+            mocks.contractChanged?.({ action: 'MAINTENANCE' });
+            await flush();
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            const next = retainQuoteWithReady(contract, 'Tick');
+            await next.ready;
+            expect(mocks.subscribe).toHaveBeenCalledTimes(2);
+            first.release(); next.release();
+        });
+
+        it('does not reuse a pre-maintenance pending ACK for a new readiness generation', async () => {
+            let reject!: (error: Error) => void;
+            mocks.subscribe.mockReturnValueOnce(new Promise((_resolve, rej) => { reject = rej; }));
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const first = retainQuoteWithReady(contract, 'Tick');
+            const invalidated = expect(first.ready).rejects.toThrow(/世代/);
+            await flush();
+            mocks.contractChanged?.({ action: 'MAINTENANCE' });
+            await invalidated;
+            const next = retainQuoteWithReady(contract, 'Tick');
+            reject(new Error('old generation failed'));
+            await next.ready;
+            expect(mocks.subscribe).toHaveBeenCalledTimes(2);
+            first.release(); next.release();
+        });
+
+        it.each(['abort', 'release'])('%s cancels only that waiter and preserves another holder', async action => {
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const { retainQuote, retainQuoteWithReady, RELEASE_GRACE_MS } = await import('./quote-ownership');
+            const other = retainQuote(contract, 'Tick');
+            const controller = new AbortController();
+            const held = retainQuoteWithReady(contract, 'Tick', { signal: controller.signal });
+            const cancelled = expect(held.ready).rejects.toMatchObject({ name: 'AbortError' });
+            if (action === 'abort') controller.abort(); else held.release();
+            await cancelled;
+            pending.resolve({ success: true });
+            await flush();
+            await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS + 1);
+            expect(mocks.unsubscribe).not.toHaveBeenCalled();
+            other();
+            await vi.advanceTimersByTimeAsync(RELEASE_GRACE_MS + 1);
+            expect(mocks.unsubscribe).toHaveBeenCalledOnce();
+        });
+
+        it('rejects a pending ACK that crosses a stream epoch', async () => {
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            const rejected = expect(held.ready).rejects.toThrow(/世代/);
+            await flush();
+            mocks.status = 'connecting'; mocks.changed?.();
+            await rejected;
+            mocks.epoch = 2; mocks.status = 'live'; mocks.changed?.();
+            pending.resolve({ success: true });
+            await flush();
+            held.release();
+        });
+
+        it('requests a targeted follower ACK through the owner and never subscribes locally', async () => {
+            const channels: { listeners: ((event: { data: unknown }) => void)[] }[] = [];
+            const sent: { kind: string; to?: string; nonce?: string }[] = [];
+            vi.stubGlobal('BroadcastChannel', class {
+                listeners: ((event: { data: unknown }) => void)[] = [];
+                constructor() { channels.push(this); }
+                addEventListener(_name: string, listener: (event: { data: unknown }) => void) { this.listeners.push(listener); }
+                postMessage(data: { kind: string }) {
+                    sent.push(data);
+                    for (const channel of channels) if (channel !== this) for (const listener of channel.listeners) void Promise.resolve().then(() => listener({ data }));
+                }
+                close() { channels.splice(channels.indexOf(this), 1); }
+            });
+            await import('./quote-ownership'); // main owner, before creating the mirror
+            vi.resetModules();
+            vi.stubGlobal('location', { search: '?popout=chart' });
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const held = retainQuoteWithReady(contract, 'Tick');
+            let settled = false;
+            void held.ready.then(() => { settled = true; });
+            await flush();
+            expect(mocks.subscribe).toHaveBeenCalledOnce(); // main owner only
+            expect(settled).toBe(false);
+            expect(sent.findIndex(message => message.kind === 'desired')).toBeLessThan(sent.findIndex(message => message.kind === 'quote-ready?'));
+            pending.resolve({ success: true });
+            await held.ready;
+            expect(sent).toContainEqual(expect.objectContaining({ kind: 'quote-ready', ok: true, to: expect.any(String), nonce: expect.any(String) }));
+            expect(mocks.subscribe).toHaveBeenCalledOnce();
+            held.release();
+        });
+
+        it('bounds a missing follower owner ACK and removes its nonce/listener after release', async () => {
+            let listener!: (event: { data: unknown }) => void;
+            const sent: Record<string, unknown>[] = [];
+            vi.stubGlobal('BroadcastChannel', class {
+                addEventListener(_name: string, fn: (event: { data: unknown }) => void) { listener = fn; }
+                postMessage(data: Record<string, unknown>) { sent.push(data); }
+                close() {}
+            });
+            vi.stubGlobal('location', { search: '?popout=chart' });
+            const { retainQuoteWithReady, QUOTE_READY_TIMEOUT_MS } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            const rejected = expect(held.ready).rejects.toThrow(/逾時/);
+            const request = sent.find(message => message.kind === 'quote-ready?')!;
+            listener({ data: { ...request, kind: 'quote-ready', to: request.client, nonce: 'wrong nonce', ok: true, ownerEpoch: 1 } });
+            await vi.advanceTimersByTimeAsync(QUOTE_READY_TIMEOUT_MS);
+            await rejected;
+            expect(mocks.subscribe).not.toHaveBeenCalled();
+            held.release();
+            listener({ data: { ...request, kind: 'quote-ready', to: request.client, ok: true, ownerEpoch: 1 } });
+            await flush();
+            expect(mocks.subscribe).not.toHaveBeenCalled();
+        });
+
+        it('disposes pending readiness listeners and timeouts', async () => {
+            const pending = deferred();
+            mocks.subscribe.mockReturnValueOnce(pending.promise);
+            const { retainQuoteWithReady } = await import('./quote-ownership');
+            const held = retainQuoteWithReady(contract, 'Tick');
+            const rejected = expect(held.ready).rejects.toMatchObject({ name: 'AbortError' });
+            await flush();
+            pagehide[0]!();
+            await rejected;
+            pending.resolve({ success: true });
+            await flush();
+        });
     });
     describe('subscriptions left behind by a reload (#386)', () => {
         let session: Map<string, string>;

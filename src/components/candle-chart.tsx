@@ -63,6 +63,7 @@ import {
 } from '../lib/chart-drawings';
 import { useQuote } from '../hooks/use-stream';
 import { getQuote, getStreamStatus, onAnyIndexQuote, onAnyTick, streamConnectionEpoch, subscribeStatusStore } from '../lib/stream';
+import { retainQuoteWithReady } from '../lib/quote-ownership';
 import { canonicalCandleTime, LiveCandleAccumulator, type LiveCandlePrint } from '../lib/live-candles';
 import { loadLiveCandleTail } from '../lib/live-candle-history';
 import {
@@ -939,10 +940,12 @@ export function CandleChart({
         let drawTimer: ReturnType<typeof setTimeout> | undefined;
         let reloadGap = false;
         let recovering = false;
+        let subscriptionReady = false;
         let continuityBroken = false;
         let observedEpoch = streamConnectionEpoch();
         let sawLive = getStreamStatus() === 'live';
         let latestObservedTrade = -Infinity;
+        let latestObservedPrint = -Infinity;
         let historyCompleteThrough = frozenMinute;
         let closedHistory: Candle[] = drawnKeyRef.current === loadKey ? barsRef.current : [];
         loadedKeyRef.current = ''; // freeze tick updates while loading
@@ -999,6 +1002,7 @@ export function CandleChart({
             const time = wallClockToUtc(canonical);
             if (acceptTime && !acceptTime(time)) return;
             if (!Number.isFinite(print.volume) || print.volume < 0) return;
+            latestObservedPrint = Math.max(latestObservedPrint, time);
             if (print.volume > 0) latestObservedTrade = Math.max(latestObservedTrade, time);
             const sec = tf.minutes * 60;
             const bucket = tf.minutes >= 1440 ? Math.floor(time / 86400) * 86400 : Math.floor(time / sec) * sec + sec;
@@ -1020,6 +1024,17 @@ export function CandleChart({
                 datetime: `${index.date}T${index.time}`, close: Number(index.close), volume: 0,
             });
         });
+        // Raw observers must exist before acquisition. REST fetched before the
+        // subscription ACK cannot cover trades lost in the subscription queue.
+        const readinessController = new AbortController();
+        const quoteHold = retainQuoteWithReady(contract, contract.security_type === 'IND' ? 'Quote' : 'Tick', {
+            signal: readinessController.signal,
+        });
+        // History may still be pending when readiness rejects; its later await
+        // owns error presentation without creating an unhandled rejection.
+        void quoteHold.ready.then(() => {
+            if (!cancelled && !continuityBroken) subscriptionReady = true;
+        }, () => undefined);
         const toRaw = (k: Parameters<typeof kbarsToCandles>[0]) => {
             const raw = kbarsToCandles(k);
             return dayOnly
@@ -1098,7 +1113,7 @@ export function CandleChart({
                     continuityBroken = true;
                     if (loadedKeyRef.current === loadKey) {
                         closedHistory = live.bars;
-                        historyCompleteThrough = Math.max(historyCompleteThrough, latestObservedTrade);
+                        historyCompleteThrough = Math.max(historyCompleteThrough, latestObservedPrint);
                     }
                     failTail();
                     loadedKeyRef.current = '';
@@ -1178,6 +1193,9 @@ export function CandleChart({
                 closedHistory = bars;
                 rawRef.current = raw;
                 historyCompleteThrough = raw.at(-1)?.time ?? frozenMinute;
+                await quoteHold.ready;
+                if (cancelled || continuityBroken || !candleSeriesRef.current) return;
+                subscriptionReady = true;
                 // Index KBars have no observation watermark or raw trade-tail
                 // endpoint. Keep closed bars until a fully observed target
                 // bucket begins; older quotes must not roll the close back.
@@ -1230,6 +1248,13 @@ export function CandleChart({
             .catch(() => {
                 if (cancelled || continuityBroken) return;
                 failTail();
+                if (!subscriptionReady) {
+                    // An unconfirmed subscription cannot establish the start
+                    // of a fully observed future bucket. Require a fresh ACK.
+                    continuityBroken = true;
+                    loadedKeyRef.current = '';
+                    setLoading(false);
+                }
                 loadMoreRef.current = loadMore;
                 setHistoryError(true);
             })
@@ -1241,6 +1266,8 @@ export function CandleChart({
             offTick();
             offIndex();
             offStatus();
+            readinessController.abort();
+            quoteHold.release();
             if (drawTimer !== undefined) clearTimeout(drawTimer);
         };
     }, [contract, tf, historySeq, dayOnly]);
@@ -2464,7 +2491,7 @@ export function CandleChart({
                     instances.length > 0) && (
                     <div className={styles.triggerList}>
                         {liveTailError && <div data-live-candle-status='incomplete'>
-                            <AsyncStatus phase='error' text='即時 K 線未完整；等待下一根完整 K 棒，或更新歷史重試' className={panel.mono} />
+                            <AsyncStatus phase='error' text='即時 K 線未完整；訂閱或成交補載尚未驗證，請更新歷史重試' className={panel.mono} />
                         </div>}
                         {showOhlc && (
                             <OhlcLegend
