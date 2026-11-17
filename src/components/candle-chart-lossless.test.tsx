@@ -214,6 +214,43 @@ describe('CandleChart lossless raw trade aggregation', () => {
     });
 
 
+    it.each(['1m', '1D'])('counts the 13:30 stock closing auction exactly once in %s history and REST handoff', async (interval) => {
+        setNow('2026-10-08T13:30:20');
+        const history = deferred<ReturnType<typeof kbars>>();
+        m.history.mockReturnValueOnce(history.promise);
+        m.tail.mockResolvedValueOnce([
+            { datetime: '2026-10-08T13:29:05.000001', close: 101, volume: 2, tickType: 1 },
+            { datetime: '2026-10-08T13:29:55.000002', close: 95, volume: 5, tickType: 1 },
+            { datetime: '2026-10-08T13:30:00.000000', close: 110, volume: 5, tickType: 1 },
+        ]);
+        const renderer = mount({ interval });
+        await settle();
+        // The same auction may arrive on SSE while the history request is open.
+        act(() => tick('13:30:00.000000', 110, 5));
+        history.resolve({
+            datetime: ['2026-10-08 13:29:00', '2026-10-08 13:30:00'],
+            Open: [100, 101], High: [100, 110], Low: [100, 95], Close: [100, 110],
+            // The 13:30 minute already combines continuous trades (7) and auction (5).
+            Volume: [3, 12], Amount: [300, 1227],
+        });
+        await settle();
+        await draw();
+        expect(m.tail).toHaveBeenCalledWith(expect.objectContaining({ code: stock.code }), wall('2026-10-08T13:29:00'), expect.anything());
+        expect((histogram().last as any[]).reduce((sum, bar) => sum + bar.value, 0)).toBe(15);
+        if (interval === '1m') {
+            expect(candleAt('2026-10-08T13:29:00')).toMatchObject({ open: 100, high: 100, low: 100, close: 100 });
+            expect(volumeAt('2026-10-08T13:29:00')).toBe(3);
+            expect(candleAt('2026-10-08T13:30:00')).toMatchObject({ open: 101, high: 110, low: 95, close: 110 });
+            expect(volumeAt('2026-10-08T13:30:00')).toBe(12);
+            expect(candleAt('2026-10-08T13:31:00')).toBeUndefined();
+            expect(readout(renderer, 'volume')).toBe('量12');
+        } else {
+            expect(candleAt('2026-10-08T00:00:00')).toMatchObject({ open: 100, high: 110, low: 95, close: 110 });
+            expect(volumeAt('2026-10-08T00:00:00')).toBe(15);
+            expect(readout(renderer, 'volume')).toBe('量15');
+        }
+    });
+
     it('does not mix an incomplete minute into a live bar when the REST tail fails', async () => {
         setNow('2026-10-08T09:02:30');
         m.history.mockResolvedValueOnce(kbars([
@@ -288,6 +325,35 @@ describe('CandleChart lossless raw trade aggregation', () => {
         expect(candleAt('2026-10-06T09:01:00')).toMatchObject({ open: 70, close: 70 });
         expect(candleAt('2026-10-08T09:01:00')).toMatchObject({ open: 101, high: 120, low: 80, close: 110 });
         expect(volumeAt('2026-10-08T09:01:00')).toBe(19);
+    });
+
+    it('does not restore an incomplete target bar when paging after a tail failure', async () => {
+        setNow('2026-10-08T09:03:30');
+        const page = deferred<ReturnType<typeof kbars>>();
+        m.history.mockResolvedValueOnce(kbars([
+            ['2026-10-07T09:00:00', '2026-10-07T09:05:00', () => 100],
+            ['2026-10-08T09:00:00', '2026-10-08T09:04:00', () => 50],
+        ])).mockReturnValueOnce(page.promise);
+        m.tail.mockRejectedValueOnce(new Error('fixture tail unavailable'));
+        mount({ interval: '5m' });
+        await settle();
+        expect(candleAt('2026-10-08T09:05:00')).toBeUndefined();
+        act(() => logicalRangeHandlers.forEach((handler) => handler({ from: 0, to: 20 })));
+        await settle();
+        expect(m.history).toHaveBeenCalledTimes(2);
+        page.resolve(kbars([['2026-10-06T09:00:00', '2026-10-06T09:05:00', () => 70]]));
+        await settle();
+        expect(candleAt('2026-10-06T09:05:00')).toMatchObject({ open: 70, close: 70 });
+        expect(candleAt('2026-10-07T09:05:00')).toMatchObject({ open: 100, close: 100 });
+        expect(candleAt('2026-10-08T09:05:00')).toBeUndefined();
+        expect(volumeAt('2026-10-08T09:05:00')).toBeUndefined();
+        expect((histogram().last as any[]).reduce((sum, bar) => sum + bar.value, 0)).toBe(100);
+        setNow('2026-10-08T09:05:00');
+        act(() => tick('09:05:00.000001', 110, 4));
+        await draw();
+        expect(candleAt('2026-10-08T09:05:00')).toBeUndefined();
+        expect(candleAt('2026-10-08T09:10:00')).toMatchObject({ open: 110, high: 110, low: 110, close: 110 });
+        expect(volumeAt('2026-10-08T09:10:00')).toBe(4);
     });
 
     it('reconciles after reconnect and prevents an older pending generation from publishing', async () => {

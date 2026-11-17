@@ -273,6 +273,44 @@ describe('LiveCandleAccumulator', () => {
         expect(accumulator.last).toEqual({ time: Date.parse('2026-11-18T00:00:00Z') / 1000, open: 110, high: 110, low: 110, close: 110, volume: 3 });
     });
 
+    it.each([1, 5, 15, 1440])('counts the stock closing auction once in its preceding %i-minute bucket', minutes => {
+        const label = minutes >= 1440 ? '00:00:00' : '13:30:00';
+        const history = minutes === 1 ? [] : [candle(label, { open: 2170, high: 2180, low: 2160, close: 2175, volume: 100 })];
+        const continuous = print('13:29:59.999999', 2175, 7, 1);
+        const auction = print('13:30:00.000000', 2170, 6801, 2);
+        const accumulator = new LiveCandleAccumulator(minutes, undefined, true);
+        accumulator.push(continuous);
+        accumulator.seed(history, second('13:29:00'), [continuous, auction]);
+        accumulator.push(auction); // REST-covered closing print delivered later by SSE
+        expect(accumulator.bars).toEqual([{
+            time: second(label), open: minutes === 1 ? 2175 : 2170,
+            high: minutes === 1 ? 2175 : 2180, low: minutes === 1 ? 2170 : 2160,
+            close: 2170, volume: (minutes === 1 ? 0 : 100) + 7 + 6801,
+        }]);
+    });
+
+    it('keeps microsecond ordering within the stock closing-auction second', () => {
+        const accumulator = new LiveCandleAccumulator(1, undefined, true);
+        accumulator.seed([], second('13:29:00'), []);
+        accumulator.push(print('13:29:59.999999', 2175, 1));
+        accumulator.push(print('13:30:00.123457', 2170, 2));
+        accumulator.push(print('13:30:00.123456', 2165, 3));
+        expect(accumulator.bars).toEqual([{
+            time: second('13:30:00'), open: 2175, high: 2175, low: 2165, close: 2170, volume: 6,
+        }]);
+    });
+
+    it('keeps regular boundary bucketing when the stock auction option is off or at another time', () => {
+        const regular = new LiveCandleAccumulator(1);
+        regular.seed([], second('13:29:00'), []);
+        regular.push(print('13:30:00', 2170, 1));
+        expect(regular.last?.time).toBe(second('13:31:00'));
+        const stock = new LiveCandleAccumulator(1, undefined, true);
+        stock.seed([], second('13:24:00'), []);
+        stock.push(print('13:25:00', 2175, 1));
+        expect(stock.last?.time).toBe(second('13:26:00'));
+    });
+
     it('uses event time for late open/close and requests a reset for older-bucket changes', () => {
         const accumulator = empty();
         accumulator.push(print('09:01:40', 120, 1));

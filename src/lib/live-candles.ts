@@ -24,6 +24,7 @@ interface Bucket {
 const MAX_PENDING_PRINTS = 50_000;
 const MAX_REST_PRINTS = 65_536;
 const DAY_SECONDS = 86_400;
+const STOCK_CLOSE_SECONDS = 13 * 3600 + 30 * 60;
 
 /** Taiwan wall-clock ISO, retaining sub-millisecond event identity. */
 export function canonicalCandleTime(datetime: string): string | null {
@@ -61,6 +62,7 @@ export class LiveCandleAccumulator {
     private readonly bucketSeconds: number;
     private readonly daily: boolean;
     private readonly acceptTime?: (wallSeconds: number) => boolean;
+    private readonly stockCloseAuction: boolean;
     private readonly buckets = new Map<number, Bucket>();
     private readonly dirty = new Set<number>();
     private currentBars: Candle[] = [];
@@ -72,11 +74,12 @@ export class LiveCandleAccumulator {
     private needsReset = false;
     private didAppend = false;
 
-    constructor(minutes: number, acceptTime?: (wallSeconds: number) => boolean) {
+    constructor(minutes: number, acceptTime?: (wallSeconds: number) => boolean, stockCloseAuction = false) {
         if (!Number.isSafeInteger(minutes) || minutes <= 0) throw new Error('Candle interval must be a positive integer');
         this.bucketSeconds = minutes * 60;
         this.daily = minutes >= 1440;
         this.acceptTime = acceptTime;
+        this.stockCloseAuction = stockCloseAuction;
     }
 
     get bars(): Candle[] { return this.currentBars; }
@@ -182,9 +185,15 @@ export class LiveCandleAccumulator {
 
     private apply(print: NormalizedPrint): void {
         if (print.wallSeconds < this.cutoff) return;
+        // The stock closing auction is stamped at 13:30:00 but closes the
+        // preceding interval; continuous prints at other boundaries open the
+        // next interval. Keep the original fractional timestamp for ordering.
+        const closeAuction = this.stockCloseAuction && print.wallSeconds % DAY_SECONDS === STOCK_CLOSE_SECONDS;
         const time = this.daily
             ? Math.floor(print.wallSeconds / DAY_SECONDS) * DAY_SECONDS
-            : Math.floor(print.wallSeconds / this.bucketSeconds) * this.bucketSeconds + this.bucketSeconds;
+            : closeAuction
+                ? Math.ceil(print.wallSeconds / this.bucketSeconds) * this.bucketSeconds
+                : Math.floor(print.wallSeconds / this.bucketSeconds) * this.bucketSeconds + this.bucketSeconds;
         let bucket = this.buckets.get(time);
         const priorLastTime = this.last?.time;
         if (!bucket) {

@@ -934,7 +934,8 @@ export function CandleChart({
         const acceptTime = dayOnly
             ? (time: number) => isDaySessionTick(contract.security_type, time)
             : undefined;
-        let live = new LiveCandleAccumulator(tf.minutes, acceptTime);
+        const stockCloseAuction = contract.security_type === 'STK';
+        let live = new LiveCandleAccumulator(tf.minutes, acceptTime, stockCloseAuction);
         let drawTimer: ReturnType<typeof setTimeout> | undefined;
         let reloadGap = false;
         let recovering = false;
@@ -1067,7 +1068,7 @@ export function CandleChart({
             const sec = tf.minutes * 60;
             const from = tf.minutes >= 1440 ? Math.floor(now / 86400) * 86400 + 86400 : Math.floor(now / sec) * sec + sec;
             const completed = closedHistory.filter((bar) => bar.time < (tf.minutes >= 1440 ? from - 86400 : from));
-            live = new LiveCandleAccumulator(tf.minutes, acceptTime);
+            live = new LiveCandleAccumulator(tf.minutes, acceptTime, stockCloseAuction);
             live.seed(completed, from, []);
             live.takeChanges();
             applyBars(live.bars);
@@ -1128,7 +1129,10 @@ export function CandleChart({
                     }
                     dryPages = 0;
                     rawRef.current = [...older, ...rawRef.current];
-                    live.prepend(aggregate(rawRef.current, tf.minutes));
+                    // Only new older pages may be added. Reusing all raw history
+                    // could resurrect an incomplete target bucket removed by
+                    // failTail while its live prefix was unavailable.
+                    live.prepend(aggregate(older, tf.minutes));
                     applyBars(live.bars);
                     live.takeChanges();
                     ohlcStore.bump();
@@ -1151,7 +1155,12 @@ export function CandleChart({
                 const isIndex = contract.security_type === 'IND';
                 // A kbar response may include the open minute. Trades need an
                 // exact raw prefix; a partial minute has no snapshot watermark.
-                const raw = allRaw.filter((bar) => bar.time <= frozenMinute);
+                const todayClose = Math.floor(frozenMinute / 86400) * 86400 + 13 * 3600 + 30 * 60;
+                // Shioaji's stock13:30 kbar already includes the13:30 closing
+                // auction. Rebuild that final minute from raw prints as well,
+                // otherwise a tail starting13:30 would count the auction twice.
+                const closedThrough = stockCloseAuction && frozenMinute >= todayClose ? todayClose - 60 : frozenMinute;
+                const raw = allRaw.filter((bar) => bar.time <= closedThrough);
                 const bars = aggregate(raw, tf.minutes);
                 closedHistory = bars;
                 rawRef.current = raw;
