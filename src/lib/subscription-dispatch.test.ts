@@ -29,6 +29,7 @@ vi.mock('./protection-env', () => ({
 vi.mock('./stream', () => ({
     registerSubscription: m.register, unregisterSubscription: vi.fn(),
     getStreamStatus: () => 'live', isStreamOwner: () => true,
+    streamConnectionEpoch: () => 1, onContractEvent: () => () => undefined,
     subscribeStatusStore: () => () => undefined, subscribeStreamOwner: () => () => undefined,
     onOrderEvent: () => () => undefined, onOddLotTick: () => () => undefined, onAnyBidAsk: () => () => undefined, onStreamEvent: () => () => undefined,
     onAnyTick: (callback: typeof m.tick) => { m.tick = callback; return () => undefined; },
